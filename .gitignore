@@ -1,0 +1,24 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.local
+
+# Flutter / Dart
+app/build/
+app/.dart_tool/
+app/.flutter-plugins*
+app/.packages
+app/ios/Pods/
+app/ios/.symlinks/
+app/android/.gradle/
+app/android/local.properties
+app/*.iml
+
+# IDE / OS
+.idea/
+.vscode/
+*.log
+Thumbs.db
+.DS_Store

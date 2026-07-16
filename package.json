@@ -1,0 +1,19 @@
+{
+  "name": "goat",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Goat (Козёл) — multiplayer card game: Colyseus server + Flutter client",
+  "workspaces": [
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm test --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "dev": "npm run dev -w packages/server",
+    "simulate": "npm run simulate -w packages/engine"
+  }
+}

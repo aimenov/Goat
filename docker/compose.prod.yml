@@ -1,0 +1,51 @@
+# Production stack: game server + Postgres + Caddy (TLS termination).
+# Usage on the VPS:
+#   1. Set DOMAIN and JWT_SECRET in docker/.env
+#   2. docker compose -f docker/compose.prod.yml up -d --build
+services:
+  server:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 2568
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET in docker/.env}
+      DATABASE_URL: postgres://goat:${PG_PASSWORD:-goat}@postgres:5432/goat
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "2568"
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: goat
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-goat}
+      POSTGRES_DB: goat
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U goat"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN in docker/.env}
+    command: caddy reverse-proxy --from ${DOMAIN} --to server:2568
+    volumes:
+      - caddy_data:/data
+
+volumes:
+  pg_data:
+  caddy_data:

@@ -99,15 +99,18 @@ class _GoatAppState extends ConsumerState<GoatApp> {
       theme: buildCasinoTheme(),
       routerConfig: _router,
       builder: (context, child) {
-        final content = child ?? const SizedBox.shrink();
-        if (_soundUnlocked) return content;
+        // Permanently mounted: swapping this wrapper out after the first tap
+        // changed the widget type above the Navigator and forced a full
+        // reparent (duplicate-GlobalKey risk mid-transition). Only the
+        // callback is gated.
         return Listener(
           behavior: HitTestBehavior.translucent,
           onPointerDown: (_) {
+            if (_soundUnlocked) return;
+            _soundUnlocked = true; // no rebuild needed — nothing visual changes
             ref.read(soundServiceProvider).markUnlocked();
-            setState(() => _soundUnlocked = true);
           },
-          child: content,
+          child: child ?? const SizedBox.shrink(),
         );
       },
     );

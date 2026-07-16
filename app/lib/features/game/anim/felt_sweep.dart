@@ -6,6 +6,7 @@ library;
 
 import 'dart:math' show pi;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../../../shared/theme/tokens.dart';
@@ -67,15 +68,22 @@ class _SweepPainter extends CustomPainter {
 
   Paint _paintFor(Size size) {
     if (_bandPaint != null && _shaderSize == size) return _bandPaint!;
-    final bandW = size.width * 0.35;
-    _bandPaint = Paint()
-      ..shader = LinearGradient(
-        colors: [
-          Tokens.gold100.withValues(alpha: 0),
-          Tokens.gold100.withValues(alpha: 0.10),
-          Tokens.gold100.withValues(alpha: 0),
-        ],
-      ).createShader(Rect.fromLTWH(-bandW / 2, 0, bandW, 1));
+    if (kIsWeb) {
+      // Web: same band, same motion, but a solid low-alpha gold fill — the
+      // rotated-clip × linear-gradient combo would compile a fresh fragment
+      // shader variant right at deal start (peak compile pressure).
+      _bandPaint = Paint()..color = Tokens.gold100.withValues(alpha: 0.05);
+    } else {
+      final bandW = size.width * 0.35;
+      _bandPaint = Paint()
+        ..shader = LinearGradient(
+          colors: [
+            Tokens.gold100.withValues(alpha: 0),
+            Tokens.gold100.withValues(alpha: 0.10),
+            Tokens.gold100.withValues(alpha: 0),
+          ],
+        ).createShader(Rect.fromLTWH(-bandW / 2, 0, bandW, 1));
+    }
     _shaderSize = size;
     return _bandPaint!;
   }

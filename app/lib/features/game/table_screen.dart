@@ -390,21 +390,39 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                 child: FeltSweep(key: ValueKey('sweep-$_sweepGen')),
               ),
             SafeArea(
-              child: Column(
-                children: [
-                  _topBar(state),
-                  _opponentsArea(state),
-                  Expanded(
-                    child: KeyedSubtree(
-                      key: _anchors.trick,
-                      child: _centerArea(state),
-                    ),
-                  ),
-                  if (state.roomPhase == RoomPhase.playing) _timerStrip(state),
-                  _myArea(state),
-                  _actionBar(state, controller),
-                  _reactionBar(state, controller),
-                ],
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final column = Column(
+                    // Every child keyed and permanently mounted: this Column
+                    // holds GlobalKey anchors, and positional reconciliation
+                    // while inserting/removing siblings (the old
+                    // lobby→playing timer insert) re-inflated keyed subtrees
+                    // before the old elements unregistered → "Duplicate
+                    // GlobalKeys" → white screen on web.
+                    children: [
+                      KeyedSubtree(key: const ValueKey('topBar'), child: _topBar(state)),
+                      KeyedSubtree(key: const ValueKey('opponents'), child: _opponentsArea(state)),
+                      Expanded(
+                        child: KeyedSubtree(
+                          key: _anchors.trick,
+                          child: _centerArea(state),
+                        ),
+                      ),
+                      // permanently mounted: collapses to a 4px box when idle
+                      KeyedSubtree(key: const ValueKey('timer'), child: _timerStrip(state)),
+                      KeyedSubtree(key: const ValueKey('me'), child: _myArea(state)),
+                      KeyedSubtree(key: const ValueKey('actions'), child: _actionBar(state, controller)),
+                      KeyedSubtree(key: const ValueKey('reactions'), child: _reactionBar(state, controller)),
+                    ],
+                  );
+                  // Short browser windows: scroll instead of overflowing —
+                  // the fixed-height children exceed tiny viewports.
+                  const minTableHeight = 560.0;
+                  if (constraints.maxHeight >= minTableHeight) return column;
+                  return SingleChildScrollView(
+                    child: SizedBox(height: minTableHeight, child: column),
+                  );
+                },
               ),
             ),
             Positioned.fill(child: FlightLayer(key: _flightKey, sound: _sound)),
@@ -1548,7 +1566,10 @@ class _TableScreenState extends ConsumerState<TableScreen> {
             foregroundPainter: const GoldFramePainter(),
             child: Padding(
               padding: const EdgeInsets.all(20),
-              child: Column(
+              // scrolls on short windows instead of overflowing (the
+              // game-over overlay already does this)
+              child: SingleChildScrollView(
+                child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Text('Итоги раздачи', style: Tokens.headlineSerif),
@@ -1630,6 +1651,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                   const SizedBox(height: 8),
                   const Text('Нажмите, чтобы закрыть', style: Tokens.caption),
                 ],
+                ),
               ),
             ),
           ),

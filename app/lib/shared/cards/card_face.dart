@@ -78,13 +78,25 @@ class _CardFaceState extends State<CardFace> {
                     color: Tokens.suitBlack.withValues(alpha: 0.2),
                     width: 0.8,
                   ),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: selected ? 0.5 : (lifted ? 0.45 : 0.35)),
-            blurRadius: lifted ? 8 : 4,
-            offset: Offset(0, lifted ? 4 : 2),
-          ),
-        ],
+        // Web: one constant shadow (the resting values). Animating the blur
+        // sigma/offset per card multiplies first-use blur-pipeline variants
+        // during the deal burst on WebGL — the select/hover lift still reads
+        // via the border + translate. Native keeps the animated shadow.
+        boxShadow: kIsWeb
+            ? const [
+                BoxShadow(
+                  color: Color(0x59000000), // black @ 0.35
+                  blurRadius: 4,
+                  offset: Offset(0, 2),
+                ),
+              ]
+            : [
+                BoxShadow(
+                  color: Colors.black.withValues(alpha: selected ? 0.5 : (lifted ? 0.45 : 0.35)),
+                  blurRadius: lifted ? 8 : 4,
+                  offset: Offset(0, lifted ? 4 : 2),
+                ),
+              ],
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(radius),

@@ -8,6 +8,7 @@ import 'dart:async';
 import 'dart:math';
 import 'dart:ui' show lerpDouble;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -278,20 +279,27 @@ class _CardFlightFx extends _Fx {
       final f = (raw / 0.38).clamp(0.0, 1.0);
       sx = (1 - 2 * f).abs().clamp(0.08, 1.0);
     }
+    Widget child = Transform.rotate(
+      angle: angle,
+      child: Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.diagonal3Values(scale * sx, scale, 1),
+        child: card,
+      ),
+    );
+    var opacity = _opacity(raw);
+    // Web: every Opacity is a saveLayer, and 24-36 concurrent deal flights
+    // land within a few frames — quantize to fully-opaque past 0.9 and only
+    // pay for the layer while a fade is actually visible (flights just pop
+    // ~10 px sooner). Native keeps the full fade.
+    if (kIsWeb && opacity > 0.9) opacity = 1.0;
+    if (!kIsWeb || opacity < 1.0) {
+      child = Opacity(opacity: opacity, child: child);
+    }
     return Positioned(
       left: pos.dx - width / 2,
       top: pos.dy - height / 2,
-      child: Opacity(
-        opacity: _opacity(raw),
-        child: Transform.rotate(
-          angle: angle,
-          child: Transform(
-            alignment: Alignment.center,
-            transform: Matrix4.diagonal3Values(scale * sx, scale, 1),
-            child: card,
-          ),
-        ),
-      ),
+      child: child,
     );
   }
 
@@ -455,9 +463,14 @@ class _TrumpFx extends _Fx {
     final bannerOpacity = sin(pi * bt);
     final bannerDx = lerpDouble(-50.0, 50.0, bt)!;
 
-    final transform = Matrix4.identity()
-      ..setEntry(3, 2, 0.0014)
-      ..rotateY(showBack ? angle : angle - pi);
+    // Web: a plain scaleX flip (exactly like the discard flip) — the
+    // perspective entry would compile a distinct texture-sampling pipeline
+    // variant right in the deal-start burst. Native keeps the 3D-ish flip.
+    final transform = kIsWeb
+        ? Matrix4.diagonal3Values(max(0.08, cos(angle).abs()), 1.0, 1.0)
+        : (Matrix4.identity()
+          ..setEntry(3, 2, 0.0014)
+          ..rotateY(showBack ? angle : angle - pi));
 
     const w = _cardH * cardAspect;
     return Positioned.fill(

@@ -6,6 +6,7 @@ library;
 
 import 'dart:math';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 
@@ -75,6 +76,22 @@ class _PulseGlowState extends State<PulseGlow>
         animation: _controller,
         builder: (context, child) {
           final v = Curves.easeInOut.transform(_controller.value);
+          if (kIsWeb) {
+            // Web: a solid stroke pulse instead of a per-frame-changing blur
+            // sigma — the animated MaskFilter shadow is a continuous shader-
+            // variant load the whole game (someone always has the turn).
+            // Reads nearly identically at ~2 px.
+            return DecoratedBox(
+              decoration: BoxDecoration(
+                borderRadius: widget.borderRadius,
+                border: Border.all(
+                  color: widget.color.withValues(alpha: 0.30 + 0.45 * v),
+                  width: 1.5 + 1.0 * v,
+                ),
+              ),
+              child: child,
+            );
+          }
           return DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: widget.borderRadius,

@@ -63,6 +63,39 @@ class _CardFaceState extends State<CardFace> {
     final selected = widget.selected;
     final lifted = selected || _hovered;
 
+    // Static fast path: non-interactive, unselected faces (trick chains,
+    // trump plaque, won-pile sheet, flight spawns) need none of the implicit
+    // animation machinery — two AnimatedContainers per card is 2 controllers
+    // + tickers each (~25-35 cards on a busy table) plus decoration diffing
+    // per rebuild. A plain Container with the resting decoration paints
+    // identically. (_hovered can't be true here: hover requires onTap.)
+    if (widget.onTap == null && !selected) {
+      Widget result = Container(
+        width: width,
+        height: height,
+        decoration: BoxDecoration(
+          color: Tokens.ivory,
+          borderRadius: BorderRadius.circular(radius),
+          border: shohaCard
+              ? Border.all(color: Tokens.gold400, width: 2)
+              : Border.all(
+                  color: Tokens.suitBlack.withValues(alpha: 0.2),
+                  width: 0.8,
+                ),
+          boxShadow: const [
+            BoxShadow(
+              color: Color(0x59000000), // black @ 0.35 — the resting shadow
+              blurRadius: 4,
+              offset: Offset(0, 2),
+            ),
+          ],
+        ),
+        child: _faceContent(height, radius, shohaCard),
+      );
+      if (widget.dimmed) result = Opacity(opacity: 0.45, child: result);
+      return result;
+    }
+
     final face = AnimatedContainer(
       duration: const Duration(milliseconds: 150),
       width: width,
@@ -98,7 +131,42 @@ class _CardFaceState extends State<CardFace> {
                 ),
               ],
       ),
-      child: ClipRRect(
+      child: _faceContent(height, radius, shohaCard),
+    );
+
+    Widget result = AnimatedContainer(
+      duration: const Duration(milliseconds: 150),
+      transform: Matrix4.translationValues(0, selected ? -8 : 0, 0),
+      child: face,
+    );
+    if (widget.dimmed) result = Opacity(opacity: 0.45, child: result);
+    if (widget.onTap != null) {
+      result = GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: result,
+      );
+    }
+    // Hover-lift for web/desktop mouse users; a strict no-op on touch (the
+    // platform gate plus MouseRegion's mouse-only enter/exit guarantee it).
+    if (_hoverCapable) {
+      result = MouseRegion(
+        cursor: SystemMouseCursors.click,
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: AnimatedSlide(
+          offset: _hovered ? const Offset(0, -0.06) : Offset.zero,
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+          child: result,
+        ),
+      );
+    }
+    return result;
+  }
+
+  /// Clipped painter + shoha ribbon — shared by the static and animated paths.
+  Widget _faceContent(double height, double radius, bool shohaCard) => ClipRRect(
         borderRadius: BorderRadius.circular(radius),
         child: Stack(
           fit: StackFit.expand,
@@ -137,39 +205,7 @@ class _CardFaceState extends State<CardFace> {
               ),
           ],
         ),
-      ),
-    );
-
-    Widget result = AnimatedContainer(
-      duration: const Duration(milliseconds: 150),
-      transform: Matrix4.translationValues(0, selected ? -8 : 0, 0),
-      child: face,
-    );
-    if (widget.dimmed) result = Opacity(opacity: 0.45, child: result);
-    if (widget.onTap != null) {
-      result = GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
-        child: result,
       );
-    }
-    // Hover-lift for web/desktop mouse users; a strict no-op on touch (the
-    // platform gate plus MouseRegion's mouse-only enter/exit guarantee it).
-    if (_hoverCapable) {
-      result = MouseRegion(
-        cursor: SystemMouseCursors.click,
-        onEnter: (_) => setState(() => _hovered = true),
-        onExit: (_) => setState(() => _hovered = false),
-        child: AnimatedSlide(
-          offset: _hovered ? const Offset(0, -0.06) : Offset.zero,
-          duration: const Duration(milliseconds: 120),
-          curve: Curves.easeOut,
-          child: result,
-        ),
-      );
-    }
-    return result;
-  }
 }
 
 /// Paints the entire card face: ivory gradient, inner hairline, Playfair

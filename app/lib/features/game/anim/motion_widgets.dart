@@ -69,45 +69,46 @@ class _PulseGlowState extends State<PulseGlow>
   @override
   Widget build(BuildContext context) {
     if (!widget.active) return widget.child;
-    // RepaintBoundary keeps the per-frame glow repaint from dirtying the
-    // surrounding tree (seat rows, hand strip, ...).
-    return RepaintBoundary(
-      child: AnimatedBuilder(
-        animation: _controller,
-        builder: (context, child) {
-          final v = Curves.easeInOut.transform(_controller.value);
-          if (kIsWeb) {
-            // Web: a solid stroke pulse instead of a per-frame-changing blur
-            // sigma — the animated MaskFilter shadow is a continuous shader-
-            // variant load the whole game (someone always has the turn).
-            // Reads nearly identically at ~2 px.
-            return DecoratedBox(
-              decoration: BoxDecoration(
-                borderRadius: widget.borderRadius,
-                border: Border.all(
-                  color: widget.color.withValues(alpha: 0.30 + 0.45 * v),
-                  width: 1.5 + 1.0 * v,
-                ),
-              ),
-              child: child,
-            );
-          }
+    // The RepaintBoundary sits INSIDE the per-frame DecoratedBox: the child
+    // subtree (a whole opponent tile) is cached as its own layer and only
+    // re-composited each frame — never re-painted — while the glow decoration
+    // repaints alone. The tile call site adds an outer boundary that keeps
+    // the glow repaint off the rest of the screen.
+    return AnimatedBuilder(
+      animation: _controller,
+      child: RepaintBoundary(child: widget.child),
+      builder: (context, child) {
+        final v = Curves.easeInOut.transform(_controller.value);
+        if (kIsWeb) {
+          // Web: a solid stroke pulse instead of a per-frame-changing blur
+          // sigma — the animated MaskFilter shadow is a continuous shader-
+          // variant load the whole game (someone always has the turn).
+          // Reads nearly identically at ~2 px.
           return DecoratedBox(
             decoration: BoxDecoration(
               borderRadius: widget.borderRadius,
-              boxShadow: [
-                BoxShadow(
-                  color: widget.color.withValues(alpha: 0.18 + 0.30 * v),
-                  blurRadius: 8 + 8 * v,
-                  spreadRadius: 0.5 + 2 * v,
-                ),
-              ],
+              border: Border.all(
+                color: widget.color.withValues(alpha: 0.30 + 0.45 * v),
+                width: 1.5 + 1.0 * v,
+              ),
             ),
             child: child,
           );
-        },
-        child: widget.child,
-      ),
+        }
+        return DecoratedBox(
+          decoration: BoxDecoration(
+            borderRadius: widget.borderRadius,
+            boxShadow: [
+              BoxShadow(
+                color: widget.color.withValues(alpha: 0.18 + 0.30 * v),
+                blurRadius: 8 + 8 * v,
+                spreadRadius: 0.5 + 2 * v,
+              ),
+            ],
+          ),
+          child: child,
+        );
+      },
     );
   }
 }
@@ -206,27 +207,27 @@ class _IdleLiftState extends State<IdleLift> {
   @override
   Widget build(BuildContext context) {
     if (!widget.enabled) return widget.child;
-    // RepaintBoundary isolates the per-frame translate so a breathing card
-    // repaints alone instead of dirtying the whole hand strip.
-    return RepaintBoundary(
-      child: AnimatedBuilder(
-        animation: _IdleLiftClock.instance.phase,
-        builder: (context, child) {
-          final wave =
-              0.5 -
-              0.5 *
-                  cos(
-                    2 *
-                        pi *
-                        (_IdleLiftClock.instance.phase.value + widget.phase),
-                  );
-          return Transform.translate(
-            offset: Offset(0, -widget.amount * wave),
-            child: child,
-          );
-        },
-        child: widget.child,
-      ),
+    // The RepaintBoundary sits INSIDE the per-frame Transform: the card face
+    // is cached as its own layer and only re-composited at a new offset each
+    // frame — the full CardFacePainter never re-runs. The hand call site adds
+    // an outer boundary that keeps the translate repaint off the hand strip.
+    return AnimatedBuilder(
+      animation: _IdleLiftClock.instance.phase,
+      child: RepaintBoundary(child: widget.child),
+      builder: (context, child) {
+        final wave =
+            0.5 -
+            0.5 *
+                cos(
+                  2 *
+                      pi *
+                      (_IdleLiftClock.instance.phase.value + widget.phase),
+                );
+        return Transform.translate(
+          offset: Offset(0, -widget.amount * wave),
+          child: child,
+        );
+      },
     );
   }
 }

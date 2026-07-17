@@ -72,6 +72,10 @@ final identityProvider = AsyncNotifierProvider<IdentityController, Identity?>(Id
 
 /// Owns the lifecycle of the joined room and hooks it to the game controller.
 class RoomSession extends Notifier<GameRoom?> {
+  /// Bumped by [leave]; an in-flight join/reconnect that resolves after the
+  /// user already left must not re-adopt a zombie room.
+  int _generation = 0;
+
   @override
   GameRoom? build() => null;
 
@@ -105,6 +109,7 @@ class RoomSession extends Notifier<GameRoom?> {
   }
 
   Future<void> reconnect() async {
+    final generation = _generation;
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('reconnectionToken');
     if (token == null) throw GoatTransportException('Нет сохранённой игры');
@@ -117,16 +122,22 @@ class RoomSession extends Notifier<GameRoom?> {
       await prefs.remove('reconnectionToken');
       throw GoatTransportException('Стол уже закрыт');
     }
-    _adopt(room);
+    _adopt(room, generation);
   }
 
-  void _adopt(GameRoom room) {
+  void _adopt(GameRoom room, [int? generation]) {
+    if (generation != null && generation != _generation) {
+      // The user left while this join was in flight — don't resurrect it.
+      room.leave();
+      return;
+    }
     state = room;
     ref.read(gameControllerProvider.notifier).attach(room);
     SharedPreferences.getInstance().then((prefs) => prefs.setString('reconnectionToken', room.reconnectionToken));
   }
 
   Future<void> leave() async {
+    _generation++;
     final room = state;
     state = null;
     ref.read(gameControllerProvider.notifier).detach();

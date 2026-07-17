@@ -4,11 +4,11 @@ library;
 import 'dart:async';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/cards.dart';
 import '../../core/game/game_controller.dart';
@@ -127,11 +127,14 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     if (!mounted) return;
     try {
       await ref.read(roomSessionProvider.notifier).reconnect();
-    } catch (_) {
-      // Dead or missing token — retrying is pointless; clear it and leave.
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.remove('reconnectionToken');
+    } on GoatTransportException {
+      // Dead or missing token (the session already dropped it) — retrying is
+      // pointless; leave for the lobby.
       if (mounted) context.go('/lobby');
+    } catch (_) {
+      // Transient failure (flaky network, server restarting): KEEP the token —
+      // the seat may still be held. The 10s connect timeout overlay offers
+      // retry / «В лобби».
     }
   }
 
@@ -176,36 +179,47 @@ class _TableScreenState extends ConsumerState<TableScreen> {
         next.roomPhase == RoomPhase.playing) {
       _sound.play(Sfx.myTurnDing); // 1500 ms cooldown guards resync flapping
     }
-    setState(() {
-      if (next.roomPhase != RoomPhase.connecting) {
-        _connectTimeout?.cancel();
+    // setState only when a locally-consumed field actually changed: every
+    // server event lands here, and an unconditional setState would rebuild
+    // the whole table per event (a deal is ~24 events in ~1 s).
+    var dirty = false;
+    if (next.roomPhase != RoomPhase.connecting) {
+      _connectTimeout?.cancel();
+      _connectTimeout = null;
+      if (_connectTimedOut) {
         _connectTimedOut = false;
+        dirty = true;
       }
-      if (!identical(previous?.legal, next.legal)) {
-        _selected.clear();
-        _beatAssignment.clear();
-        final legal = next.legal;
-        _beatMode = legal != null && legal.kind == 'respond' && legal.canBeat;
-        _beatTarget = _beatMode ? legal?.beatMatrix.keys.firstOrNull : null;
-      }
-      if (next.deadline != (previous?.deadline ?? 0) && next.deadline > 0) {
-        _deadlineAnchor = DateTime.now().millisecondsSinceEpoch;
-      }
-      if (next.lastDealResults != null &&
-          !identical(previous?.lastDealResults, next.lastDealResults) &&
-          next.roomPhase != RoomPhase.gameOver) {
-        _showDealOverlay = true;
-        _dealOverlayTimer?.cancel();
-        _dealOverlayTimer = Timer(const Duration(seconds: 5), () {
-          if (mounted) setState(() => _showDealOverlay = false);
-        });
-      }
-      if (next.roomPhase == RoomPhase.gameOver &&
-          previous?.roomPhase != RoomPhase.gameOver) {
-        _rematchVoted = false;
-        _showDealOverlay = false;
-      }
-    });
+    }
+    if (!identical(previous?.legal, next.legal)) {
+      _selected.clear();
+      _beatAssignment.clear();
+      final legal = next.legal;
+      _beatMode = legal != null && legal.kind == 'respond' && legal.canBeat;
+      _beatTarget = _beatMode ? legal?.beatMatrix.keys.firstOrNull : null;
+      dirty = true;
+    }
+    if (next.deadline != (previous?.deadline ?? 0) && next.deadline > 0) {
+      _deadlineAnchor = DateTime.now().millisecondsSinceEpoch;
+      dirty = true;
+    }
+    if (next.lastDealResults != null &&
+        !identical(previous?.lastDealResults, next.lastDealResults) &&
+        next.roomPhase != RoomPhase.gameOver) {
+      _showDealOverlay = true;
+      _dealOverlayTimer?.cancel();
+      _dealOverlayTimer = Timer(const Duration(seconds: 5), () {
+        if (mounted) setState(() => _showDealOverlay = false);
+      });
+      dirty = true;
+    }
+    if (next.roomPhase == RoomPhase.gameOver &&
+        previous?.roomPhase != RoomPhase.gameOver) {
+      _rematchVoted = false;
+      _showDealOverlay = false;
+      dirty = true;
+    }
+    if (dirty) setState(() {});
   }
 
   void _onTableEvent(TableEvent event) {
@@ -409,7 +423,15 @@ class _TableScreenState extends ConsumerState<TableScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final state = ref.watch(gameControllerProvider);
+    // The root watches only the coarse phase/overlay bits; each table section
+    // below is a Consumer with a narrow select() slice, so a server event
+    // rebuilds just the sections whose fields actually changed instead of the
+    // whole tree (a deal is ~24 events in ~1 s).
+    final (roomPhase, hasDealResults) = ref.watch(
+      gameControllerProvider.select(
+        (s) => (s.roomPhase, s.lastDealResults != null),
+      ),
+    );
     final controller = ref.read(gameControllerProvider.notifier);
     return Scaffold(
       backgroundColor: Colors.transparent,
@@ -436,19 +458,19 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                     // before the old elements unregistered → "Duplicate
                     // GlobalKeys" → white screen on web.
                     children: [
-                      KeyedSubtree(key: const ValueKey('topBar'), child: _topBar(state)),
-                      KeyedSubtree(key: const ValueKey('opponents'), child: _opponentsArea(state)),
+                      KeyedSubtree(key: const ValueKey('topBar'), child: _topBarSection()),
+                      KeyedSubtree(key: const ValueKey('opponents'), child: _opponentsSection()),
                       Expanded(
                         child: KeyedSubtree(
                           key: _anchors.trick,
-                          child: _centerArea(state),
+                          child: _centerSection(),
                         ),
                       ),
                       // permanently mounted: collapses to a 4px box when idle
-                      KeyedSubtree(key: const ValueKey('timer'), child: _timerStrip(state)),
-                      KeyedSubtree(key: const ValueKey('me'), child: _myArea(state)),
-                      KeyedSubtree(key: const ValueKey('actions'), child: _actionBar(state, controller)),
-                      KeyedSubtree(key: const ValueKey('reactions'), child: _reactionBar(state, controller)),
+                      KeyedSubtree(key: const ValueKey('timer'), child: _timerSection()),
+                      KeyedSubtree(key: const ValueKey('me'), child: _mySection()),
+                      KeyedSubtree(key: const ValueKey('actions'), child: _actionSection(controller)),
+                      KeyedSubtree(key: const ValueKey('reactions'), child: _reactionSection(controller)),
                     ],
                   );
                   // Short browser windows: scroll instead of overflowing —
@@ -462,22 +484,150 @@ class _TableScreenState extends ConsumerState<TableScreen> {
               ),
             ),
             Positioned.fill(child: FlightLayer(key: _flightKey, sound: _sound)),
-            if (state.roomPhase == RoomPhase.connecting) _connectingOverlay(),
-            if (state.roomPhase == RoomPhase.lobby)
-              _lobbyOverlay(state, controller),
+            if (roomPhase == RoomPhase.connecting) _connectingOverlay(),
+            if (roomPhase == RoomPhase.lobby)
+              // Full-state watch is fine here: the overlay only exists in the
+              // lobby phase, where every state change is lobby-relevant.
+              Consumer(
+                builder: (context, ref, _) =>
+                    _lobbyOverlay(ref.watch(gameControllerProvider), controller),
+              ),
             if (_showDealOverlay &&
-                state.lastDealResults != null &&
-                state.roomPhase != RoomPhase.gameOver)
-              _dealOverlay(state),
-            if (state.roomPhase == RoomPhase.gameOver)
-              _gameOverOverlay(state, controller),
-            if (state.roomPhase == RoomPhase.reconnecting) _reconnectOverlay(),
+                hasDealResults &&
+                roomPhase != RoomPhase.gameOver)
+              Consumer(
+                builder: (context, ref, _) {
+                  ref.watch(
+                    gameControllerProvider.select(
+                      (s) =>
+                          (s.lastDealResults, s.multiplier, s.seats, s.lobbySeats),
+                    ),
+                  );
+                  final s = ref.read(gameControllerProvider);
+                  return s.lastDealResults == null
+                      ? const SizedBox.shrink()
+                      : _dealOverlay(s);
+                },
+              ),
+            if (roomPhase == RoomPhase.gameOver)
+              Consumer(
+                builder: (context, ref, _) => _gameOverOverlay(
+                  ref.watch(gameControllerProvider),
+                  controller,
+                ),
+              ),
+            if (roomPhase == RoomPhase.reconnecting) _reconnectOverlay(),
             _achievementBanner(),
           ],
         ),
       ),
     );
   }
+
+  // -------------------------------------------------------- section slices
+  //
+  // Each Column section is a Consumer watching a narrow select() slice — a
+  // record of exactly the state fields that section (and every closure it
+  // builds) reads. The slice gates the rebuild; the section then renders from
+  // one fresh read of the full state, so the existing builder methods keep
+  // their signatures. Lists/objects inside the records compare by identity,
+  // which is exactly when their contents may have changed (copyWith).
+  // NOTE: local-field changes (selection, bubbles, ...) still go through
+  // setState on this State, which rebuilds all sections — that is rare,
+  // user-driven, and intentional.
+
+  Widget _topBarSection() => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(
+            gameControllerProvider.select(
+              (s) => (
+                s.roomPhase,
+                s.dealIndex,
+                s.trumpCard,
+                s.trumpSuit,
+                s.stockCount,
+                s.multiplier,
+              ),
+            ),
+          );
+          return _topBar(ref.read(gameControllerProvider));
+        },
+      );
+
+  Widget _opponentsSection() => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(
+            gameControllerProvider.select(
+              (s) => (s.roomPhase, s.playerCount, s.mySeat, s.seats, s.trick?.turn),
+            ),
+          );
+          return _opponentsArea(ref.read(gameControllerProvider));
+        },
+      );
+
+  Widget _centerSection() => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(
+            gameControllerProvider.select(
+              (s) => (s.roomPhase, s.trick, s.legal, s.seats, s.lobbySeats, s.mySeat),
+            ),
+          );
+          return _centerArea(ref.read(gameControllerProvider));
+        },
+      );
+
+  Widget _timerSection() => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(
+            gameControllerProvider.select(
+              (s) => (s.deadline, s.trick?.turn, s.mySeat, s.seats, s.lobbySeats),
+            ),
+          );
+          return _timerStrip(ref.read(gameControllerProvider));
+        },
+      );
+
+  Widget _mySection() => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(
+            gameControllerProvider.select(
+              (s) => (s.seats, s.mySeat, s.myWonPile),
+            ),
+          );
+          return _myArea(ref.read(gameControllerProvider));
+        },
+      );
+
+  /// The hand strip nested inside [_myArea]: its own slice so opponent score
+  /// pops and won-pile changes don't re-lay-out ~10 positioned cards.
+  Widget _handSection() => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(
+            gameControllerProvider.select(
+              (s) => (s.myHand, s.legal, s.isMyTurn),
+            ),
+          );
+          return _handWidget(ref.read(gameControllerProvider));
+        },
+      );
+
+  Widget _actionSection(GameController controller) => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(
+            gameControllerProvider.select(
+              (s) => (s.roomPhase, s.legal, s.isMyTurn),
+            ),
+          );
+          return _actionBar(ref.read(gameControllerProvider), controller);
+        },
+      );
+
+  Widget _reactionSection(GameController controller) => Consumer(
+        builder: (context, ref, _) {
+          ref.watch(gameControllerProvider.select((s) => s.roomPhase));
+          return _reactionBar(ref.read(gameControllerProvider), controller);
+        },
+      );
 
   /// Golden banner that slides down from the top on `achievementUnlocked`.
   /// Always in the tree (parked off-screen) so the entry slide animates.
@@ -772,7 +922,11 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     final isTurn =
         state.roomPhase == RoomPhase.playing && state.trick?.turn == seat.seat;
     final bubble = _bubbles[seat.seat];
-    return Stack(
+    // Outer boundary: the PulseGlow decoration and score-chip pops repaint
+    // this tile alone, never the rest of the screen. The seat GlobalKey stays
+    // on the Stack itself (flight anchors keep resolving the same element).
+    return RepaintBoundary(
+      child: Stack(
       key: _anchors.seat(seat.seat),
       clipBehavior: Clip.none,
       children: [
@@ -885,6 +1039,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
             ),
           ),
       ],
+      ),
     );
   }
 
@@ -1045,28 +1200,34 @@ class _TableScreenState extends ConsumerState<TableScreen> {
               Positioned(
                 left: i * offX,
                 top: i * offY,
-                child: Container(
-                  decoration: (i == chain.length - 1 && isTargetable)
-                      ? BoxDecoration(
-                          borderRadius: BorderRadius.circular(cardH * 0.09),
-                          boxShadow: [
-                            BoxShadow(
-                              color: Tokens.gold300.withValues(alpha: 0.55),
-                              blurRadius: 8,
-                              spreadRadius: 1,
-                            ),
-                          ],
-                        )
-                      : null,
-                  child: CardFace(
-                    card: chain[i],
-                    height: cardH,
-                    selected: i == chain.length - 1 && _beatTarget == chain[i],
-                    onTap: i == chain.length - 1
-                        ? () => _onTargetTap(state, chain[i])
-                        : null,
-                  ),
-                ),
+                // Covered (non-last) cards are inert: a boundary caches each
+                // face so neighbours' glow/selection repaints skip them.
+                child: i != chain.length - 1
+                    ? RepaintBoundary(
+                        child: CardFace(card: chain[i], height: cardH),
+                      )
+                    : Container(
+                        decoration: isTargetable
+                            ? BoxDecoration(
+                                borderRadius:
+                                    BorderRadius.circular(cardH * 0.09),
+                                boxShadow: [
+                                  BoxShadow(
+                                    color:
+                                        Tokens.gold300.withValues(alpha: 0.55),
+                                    blurRadius: 8,
+                                    spreadRadius: 1,
+                                  ),
+                                ],
+                              )
+                            : null,
+                        child: CardFace(
+                          card: chain[i],
+                          height: cardH,
+                          selected: _beatTarget == chain[i],
+                          onTap: () => _onTargetTap(state, chain[i]),
+                        ),
+                      ),
               ),
             if (assigned != null)
               Positioned(
@@ -1120,12 +1281,15 @@ class _TableScreenState extends ConsumerState<TableScreen> {
   Widget _timerStrip(GameUiState state) {
     final trick = state.trick;
     if (state.deadline <= 0 || trick == null) return const SizedBox(height: 4);
-    return TurnCountdown(
-      deadline: state.deadline,
-      anchor: _deadlineAnchor,
-      label: trick.turn == state.mySeat
-          ? 'Ваш ход'
-          : 'Ход: ${_nick(state, trick.turn)}',
+    // Boundary: the 250 ms countdown tick repaints only this strip.
+    return RepaintBoundary(
+      child: TurnCountdown(
+        deadline: state.deadline,
+        anchor: _deadlineAnchor,
+        label: trick.turn == state.mySeat
+            ? 'Ваш ход'
+            : 'Ход: ${_nick(state, trick.turn)}',
+      ),
     );
   }
 
@@ -1201,7 +1365,12 @@ class _TableScreenState extends ConsumerState<TableScreen> {
             ],
           ),
         ),
-        KeyedSubtree(key: _anchors.hand, child: _handWidget(state)),
+        // The hand GlobalKey stays on this KeyedSubtree; the boundary keeps
+        // hand repaints (hover lifts, selection) inside the strip.
+        KeyedSubtree(
+          key: _anchors.hand,
+          child: RepaintBoundary(child: _handSection()),
+        ),
       ],
     );
   }
@@ -1239,16 +1408,24 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                           assignedCards.contains(hand[i]) ||
                           (candidates != null && !candidates.contains(hand[i]));
                       final selected = _selected.contains(hand[i]);
-                      return IdleLift(
-                        // Gentle affordance: playable cards breathe on my turn.
-                        enabled: state.isMyTurn && !dimmed && !selected,
-                        phase: hand.isEmpty ? 0 : i / hand.length,
-                        child: CardFace(
-                          card: hand[i],
-                          height: cardH,
-                          selected: selected,
-                          dimmed: dimmed,
-                          onTap: () => _onHandTap(state, hand[i]),
+                      // Per-card boundary: a breathing/hovering card repaints
+                      // (or just re-composites) alone, and static cards stay
+                      // cached even when IdleLift is disabled.
+                      return RepaintBoundary(
+                        child: IdleLift(
+                          // Gentle affordance: playable cards breathe on my
+                          // turn. Web skips it: even composited, ~10 cards
+                          // re-rastering the scene every frame indefinitely
+                          // is a real cost on weak GPUs.
+                          enabled: !kIsWeb && state.isMyTurn && !dimmed && !selected,
+                          phase: hand.isEmpty ? 0 : i / hand.length,
+                          child: CardFace(
+                            card: hand[i],
+                            height: cardH,
+                            selected: selected,
+                            dimmed: dimmed,
+                            onTap: () => _onHandTap(state, hand[i]),
+                          ),
                         ),
                       );
                     },
@@ -1668,7 +1845,10 @@ class _TableScreenState extends ConsumerState<TableScreen> {
         color: Tokens.felt900.withValues(alpha: 0.7),
         alignment: Alignment.center,
         padding: const EdgeInsets.all(24),
-        child: Container(
+        // Boundary: the CountUpText rows animate for ~2 s; they repaint the
+        // panel alone, not the scrim or the table beneath.
+        child: RepaintBoundary(
+          child: Container(
           decoration: BoxDecoration(
             color: Tokens.surfaceHigh,
             borderRadius: BorderRadius.circular(Tokens.r20),
@@ -1766,6 +1946,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                 ),
               ),
             ),
+          ),
           ),
         ),
       ),

@@ -30,6 +30,11 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   bool _busy = false;
   Timer? _refreshTimer;
 
+  // Hoisted out of _openCreateSheet: disposing a local controller right after
+  // the sheet's future resolves lands mid exit-animation, while the sheet's
+  // TextField still uses it ("used after being disposed" → red error flash).
+  final TextEditingController _createNameController = TextEditingController();
+
   // Stagger-in guard: only rooms that weren't in the previous snapshot
   // animate, so the 5 s silent refresh never replays the entrance.
   final Set<String> _seenRooms = {};
@@ -45,6 +50,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _createNameController.dispose();
     super.dispose();
   }
 
@@ -102,7 +108,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
     var players = 4;
     var scoreLimit = 24;
     var turnSeconds = 30;
-    final nameController = TextEditingController();
+    _createNameController.clear();
 
     final create = await showModalBottomSheet<bool>(
       context: context,
@@ -159,7 +165,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
                 ),
                 const SizedBox(height: 16),
                 TextField(
-                  controller: nameController,
+                  controller: _createNameController,
                   maxLength: 24,
                   decoration: const InputDecoration(
                     labelText: 'Название стола (необязательно)',
@@ -178,9 +184,13 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
       ),
     );
 
-    final name = nameController.text.trim();
-    nameController.dispose();
+    final name = _createNameController.text.trim();
     if (create != true) return;
+    // One transition beat: let the sheet's pop animation finish before the
+    // page stack swaps — go('/table') while the pageless route is still
+    // mid-pop trips Navigator assertions (whole-screen red flash).
+    await Future<void>.delayed(const Duration(milliseconds: 280));
+    if (!mounted) return;
     await _guarded(
       () => ref.read(roomSessionProvider.notifier).createRoom(
             playerCount: players,

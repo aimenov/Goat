@@ -8,10 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/cards.dart';
 import '../../core/game/game_controller.dart';
 import '../../core/game/models.dart';
+import '../../core/net/transport.dart';
 import '../../core/services/sound.dart';
 import '../../core/session.dart';
 import '../../shared/cards/card_face.dart';
@@ -68,6 +70,11 @@ class _TableScreenState extends ConsumerState<TableScreen> {
   bool _myReadyLocal = false;
   bool _reconnectBusy = false;
 
+  // Connecting-overlay escape hatch: after ~10 s without a room the spinner
+  // becomes "Не удалось подключиться" + a way back to the lobby.
+  bool _connectTimedOut = false;
+  Timer? _connectTimeout;
+
   StreamSubscription<TableEvent>? _eventsSub;
   StreamSubscription<String>? _rejectionsSub;
   ProviderSubscription<GameUiState>? _stateSub;
@@ -102,6 +109,30 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     _eventsSub = controller.tableEvents.listen(_onTableEvent);
     _rejectionsSub = controller.rejections.listen(_onRejection);
     _stateSub = ref.listenManual(gameControllerProvider, _onGameState);
+
+    // Page reload lands on /table with no session: try the stored
+    // reconnection token; on any failure drop it and go back to the lobby.
+    if (ref.read(roomSessionProvider) == null &&
+        ref.read(gameControllerProvider).roomPhase == RoomPhase.connecting) {
+      _connectTimeout = Timer(const Duration(seconds: 10), () {
+        if (mounted) setState(() => _connectTimedOut = true);
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _attemptStartupReconnect();
+      });
+    }
+  }
+
+  Future<void> _attemptStartupReconnect() async {
+    if (!mounted) return;
+    try {
+      await ref.read(roomSessionProvider.notifier).reconnect();
+    } catch (_) {
+      // Dead or missing token — retrying is pointless; clear it and leave.
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove('reconnectionToken');
+      if (mounted) context.go('/lobby');
+    }
   }
 
   @override
@@ -114,6 +145,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
       t.cancel();
     }
     _achTimer?.cancel();
+    _connectTimeout?.cancel();
     _eventsSub?.cancel();
     _rejectionsSub?.cancel();
     _stateSub?.close();
@@ -145,6 +177,10 @@ class _TableScreenState extends ConsumerState<TableScreen> {
       _sound.play(Sfx.myTurnDing); // 1500 ms cooldown guards resync flapping
     }
     setState(() {
+      if (next.roomPhase != RoomPhase.connecting) {
+        _connectTimeout?.cancel();
+        _connectTimedOut = false;
+      }
       if (!identical(previous?.legal, next.legal)) {
         _selected.clear();
         _beatAssignment.clear();
@@ -519,94 +555,121 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     };
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 4),
-      child: Row(
-        children: [
-          IconButton(
-            tooltip: 'Выйти',
-            icon: const Icon(Icons.logout),
-            onPressed: _confirmLeave,
-          ),
-          Expanded(
-            child: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: const TextStyle(
-                fontFamily: Tokens.serifFamily,
-                fontSize: 17,
-                fontWeight: FontWeight.w700,
-                color: Tokens.gold200,
+      // LayoutBuilder: the plaque cluster gets a width cap derived from the
+      // real viewport so it scales down on narrow windows instead of
+      // overflowing; at normal widths the cap never binds (natural size).
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          // Reserve for the two icon buttons + trailing gap + a sliver of title.
+          final plaqueCap = max(60.0, constraints.maxWidth - 116);
+          return Row(
+            children: [
+              IconButton(
+                tooltip: 'Выйти',
+                icon: const Icon(Icons.logout),
+                onPressed: _confirmLeave,
               ),
-            ),
-          ),
-          if (state.roomPhase == RoomPhase.playing) ...[
-            // Trump plaque: stock/trump cluster inside a double gold hairline.
-            // The Row keeps `key: _anchors.stock` so flight anchors don't move.
-            Container(
-              decoration: BoxDecoration(
-                color: Tokens.felt900.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(Tokens.r10),
-                border: Border.all(
-                  color: Tokens.gold400.withValues(alpha: 0.7),
-                  width: 1,
-                ),
-              ),
-              padding: const EdgeInsets.all(2),
-              child: Container(
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(Tokens.r10 - 2),
-                  border: Border.all(
-                    color: Tokens.gold600.withValues(alpha: 0.4),
-                    width: 0.8,
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontFamily: Tokens.serifFamily,
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: Tokens.gold200,
                   ),
                 ),
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                child: Row(
-                  key: _anchors.stock,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (state.trumpCard != null) ...[
-                      CardFace(
-                        card: state.trumpCard!,
-                        height: 36,
-                        trumpStyle: true,
-                      ),
-                      const SizedBox(width: 6),
-                    ],
-                    SuitIcon(suit: state.trumpSuit, size: 16),
-                    const SizedBox(width: 8),
-                    BrassChip(text: 'В колоде: ${state.stockCount}'),
-                  ],
-                ),
               ),
-            ),
-            if (state.multiplier > 1) ...[
-              const SizedBox(width: 8),
-              PunchIn(
-                key: ValueKey('top-mult-${state.multiplier}'),
-                child: BrassChip(
-                  text: '×${state.multiplier}',
-                  danger: state.multiplier >= 3,
+              if (state.roomPhase == RoomPhase.playing) ...[
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: plaqueCap),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        // Trump plaque: stock/trump cluster inside a double
+                        // gold hairline. The inner Row keeps
+                        // `key: _anchors.stock` so flight anchors don't move.
+                        Container(
+                          decoration: BoxDecoration(
+                            color: Tokens.felt900.withValues(alpha: 0.5),
+                            borderRadius: BorderRadius.circular(Tokens.r10),
+                            border: Border.all(
+                              color: Tokens.gold400.withValues(alpha: 0.7),
+                              width: 1,
+                            ),
+                          ),
+                          padding: const EdgeInsets.all(2),
+                          child: Container(
+                            decoration: BoxDecoration(
+                              borderRadius:
+                                  BorderRadius.circular(Tokens.r10 - 2),
+                              border: Border.all(
+                                color: Tokens.gold600.withValues(alpha: 0.4),
+                                width: 0.8,
+                              ),
+                            ),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 6,
+                              vertical: 3,
+                            ),
+                            child: Row(
+                              key: _anchors.stock,
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                if (state.trumpCard != null) ...[
+                                  CardFace(
+                                    card: state.trumpCard!,
+                                    height: 36,
+                                    trumpStyle: true,
+                                  ),
+                                  const SizedBox(width: 6),
+                                ],
+                                SuitIcon(suit: state.trumpSuit, size: 16),
+                                const SizedBox(width: 8),
+                                BrassChip(
+                                  text: 'В колоде: ${state.stockCount}',
+                                ),
+                              ],
+                            ),
+                          ),
+                        ),
+                        if (state.multiplier > 1) ...[
+                          const SizedBox(width: 8),
+                          PunchIn(
+                            key: ValueKey('top-mult-${state.multiplier}'),
+                            child: BrassChip(
+                              text: '×${state.multiplier}',
+                              danger: state.multiplier >= 3,
+                            ),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+              ],
+              // Quick mute; long-press opens the volume sheet. No tooltip
+              // here: IconButton.tooltip installs its own long-press
+              // recognizer that would win the gesture arena and make the
+              // sheet unreachable.
+              GestureDetector(
+                onLongPress: _showVolumeSheet,
+                child: IconButton(
+                  icon: Icon(
+                    _sound.muted ? Icons.volume_off : Icons.volume_up,
+                    color: Tokens.gold300,
+                  ),
+                  onPressed: () => setState(_sound.toggleMuted),
                 ),
               ),
             ],
-            const SizedBox(width: 8),
-          ],
-          // Quick mute; long-press opens the volume sheet. No tooltip here:
-          // IconButton.tooltip installs its own long-press recognizer that
-          // would win the gesture arena and make the sheet unreachable.
-          GestureDetector(
-            onLongPress: _showVolumeSheet,
-            child: IconButton(
-              icon: Icon(
-                _sound.muted ? Icons.volume_off : Icons.volume_up,
-                color: Tokens.gold300,
-              ),
-              onPressed: () => setState(_sound.toggleMuted),
-            ),
-          ),
-        ],
+          );
+        },
       ),
     );
   }
@@ -781,19 +844,28 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                   ],
                 ),
                 const SizedBox(height: 2),
-                AnimatedScoreChip(
-                  prefix: 'Очки: ',
-                  value: seat.score,
-                  fontSize: 10,
+                // FittedBox(scaleDown): natural size in a normal-width tile,
+                // shrinks instead of overflowing when three tiles share a
+                // very narrow viewport.
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: AnimatedScoreChip(
+                    prefix: 'Очки: ',
+                    value: seat.score,
+                    fontSize: 10,
+                  ),
                 ),
                 const SizedBox(height: 4),
-                Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _miniHandFan(seat.handCount),
-                    const SizedBox(width: 8),
-                    _wonChip(seat.wonCount, _wonPop[seat.seat] ?? 0),
-                  ],
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      _miniHandFan(seat.handCount),
+                      const SizedBox(width: 8),
+                      _wonChip(seat.wonCount, _wonPop[seat.seat] ?? 0),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -1080,29 +1152,52 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              AnimatedScoreChip(prefix: 'Очки: ', value: me?.score ?? 0),
+              // Loose Flexible + FittedBox: the chips keep their natural size
+              // when space allows and scale down (instead of overflowing) on
+              // narrow viewports once score/взятки hit two digits.
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: AnimatedScoreChip(
+                    prefix: 'Очки: ',
+                    value: me?.score ?? 0,
+                  ),
+                ),
+              ),
               const SizedBox(width: 8),
-              ActionChip(
-                key: _anchors.wonChip,
-                avatar: const Icon(
-                  Icons.layers,
-                  size: 16,
-                  color: Tokens.gold300,
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: ActionChip(
+                    key: _anchors.wonChip,
+                    avatar: const Icon(
+                      Icons.layers,
+                      size: 16,
+                      color: Tokens.gold300,
+                    ),
+                    label: PunchIn(
+                      key: ValueKey(
+                        'my-won-pop-${_wonPop[state.mySeat] ?? 0}',
+                      ),
+                      child: Text('Взятки: ${state.myWonPile.length}'),
+                    ),
+                    labelStyle: const TextStyle(
+                      fontSize: 12,
+                      color: Tokens.textSecondary,
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => _showWonPile(state),
+                  ),
                 ),
-                label: PunchIn(
-                  key: ValueKey('my-won-pop-${_wonPop[state.mySeat] ?? 0}'),
-                  child: Text('Взятки: ${state.myWonPile.length}'),
-                ),
-                labelStyle: const TextStyle(
-                  fontSize: 12,
-                  color: Tokens.textSecondary,
-                ),
-                visualDensity: VisualDensity.compact,
-                onPressed: () => _showWonPile(state),
               ),
               const Spacer(),
               if (myBubble != null)
-                Text(myBubble, style: const TextStyle(fontSize: 22)),
+                SizedBox(
+                  width: 26,
+                  child: Text(myBubble, style: const TextStyle(fontSize: 22)),
+                ),
             ],
           ),
         ),
@@ -1401,36 +1496,53 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     if (state.roomPhase != RoomPhase.playing) return const SizedBox.shrink();
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          for (final id in _reactionIds)
-            InkWell(
-              borderRadius: BorderRadius.circular(16),
-              onTap: () => controller.react(id),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                child: Text(
-                  _reactionEmojis[id]!,
-                  style: const TextStyle(fontSize: 20),
+      // Center + scale-down: the emoji strip keeps its natural size on
+      // normal screens and shrinks slightly on very narrow viewports.
+      child: Center(
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final id in _reactionIds)
+                InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => controller.react(id),
+                  child: Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    child: Text(
+                      _reactionEmojis[id]!,
+                      style: const TextStyle(fontSize: 20),
+                    ),
+                  ),
                 ),
-              ),
-            ),
-        ],
+            ],
+          ),
+        ),
       ),
     );
   }
 
   // ----------------------------------------------------------- overlays
 
-  Widget _connectingOverlay() => const FeltBackground(
+  Widget _connectingOverlay() => FeltBackground(
     child: Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircularProgressIndicator(),
-          SizedBox(height: 16),
-          Text('Подключение…'),
+          if (_connectTimedOut)
+            const Text('Не удалось подключиться')
+          else ...[
+            const CircularProgressIndicator(),
+            const SizedBox(height: 16),
+            const Text('Подключение…'),
+          ],
+          const SizedBox(height: 16),
+          OutlinedButton(
+            onPressed: _leaveNow,
+            child: const Text('В лобби'),
+          ),
         ],
       ),
     ),
@@ -1824,27 +1936,50 @@ class _TableScreenState extends ConsumerState<TableScreen> {
           const SizedBox(height: 16),
           const Text('Переподключение…', style: TextStyle(fontSize: 16)),
           const SizedBox(height: 16),
-          FilledButton(
-            onPressed: _reconnectBusy
-                ? null
-                : () async {
-                    setState(() => _reconnectBusy = true);
-                    try {
-                      await ref.read(roomSessionProvider.notifier).reconnect();
-                    } catch (_) {
-                      if (mounted) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(
-                            backgroundColor: Tokens.dangerDeep,
-                            content: Text('Не удалось переподключиться'),
-                          ),
-                        );
-                      }
-                    } finally {
-                      if (mounted) setState(() => _reconnectBusy = false);
-                    }
-                  },
-            child: const Text('Переподключиться'),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              FilledButton(
+                onPressed: _reconnectBusy
+                    ? null
+                    : () async {
+                        setState(() => _reconnectBusy = true);
+                        try {
+                          await ref
+                              .read(roomSessionProvider.notifier)
+                              .reconnect();
+                        } on GoatTransportException catch (e) {
+                          // e.g. «Стол уже закрыт» — the dead token is
+                          // already cleared by RoomSession.reconnect().
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                backgroundColor: Tokens.dangerDeep,
+                                content: Text(e.message),
+                              ),
+                            );
+                          }
+                        } catch (_) {
+                          if (mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                backgroundColor: Tokens.dangerDeep,
+                                content: Text('Не удалось переподключиться'),
+                              ),
+                            );
+                          }
+                        } finally {
+                          if (mounted) setState(() => _reconnectBusy = false);
+                        }
+                      },
+                child: const Text('Переподключиться'),
+              ),
+              const SizedBox(width: 12),
+              OutlinedButton(
+                onPressed: _leaveNow,
+                child: const Text('В лобби'),
+              ),
+            ],
           ),
         ],
       ),
@@ -1940,11 +2075,15 @@ class _TurnCountdownState extends State<TurnCountdown> {
         children: [
           Row(
             children: [
-              Text(
-                widget.label,
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: Tokens.textSecondary,
+              Flexible(
+                child: Text(
+                  widget.label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12,
+                    color: Tokens.textSecondary,
+                  ),
                 ),
               ),
               const Spacer(),

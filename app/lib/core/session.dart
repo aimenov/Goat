@@ -107,8 +107,16 @@ class RoomSession extends Notifier<GameRoom?> {
   Future<void> reconnect() async {
     final prefs = await SharedPreferences.getInstance();
     final token = prefs.getString('reconnectionToken');
-    if (token == null) throw GoatTransportException('no reconnection token');
-    final room = await ref.read(clientProvider).reconnect(token);
+    if (token == null) throw GoatTransportException('Нет сохранённой игры');
+    final GameRoom room;
+    try {
+      room = await ref.read(clientProvider).reconnect(token);
+    } on GoatTransportException {
+      // Dead token / disposed room: the server refused the matchmake, so
+      // retrying with the same token would fail identically — drop it.
+      await prefs.remove('reconnectionToken');
+      throw GoatTransportException('Стол уже закрыт');
+    }
     _adopt(room);
   }
 

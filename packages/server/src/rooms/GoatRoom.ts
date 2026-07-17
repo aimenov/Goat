@@ -164,6 +164,26 @@ export class GoatRoom extends Room {
         client.send(MSG.pong, { type: 'pong', t: msg.t });
         return;
       case 'resync':
+        if (!this.started) {
+          // Pre-start there is no snapshot; answer with a targeted lobby
+          // event (same payload as broadcastLobby) so a client that missed
+          // the initial broadcast still learns the seats.
+          const seats: LobbySeat[] = this.seats.map((s, i) => ({
+            seat: i,
+            nickname: s.nickname,
+            ready: s.ready,
+            connected: s.connected,
+            isHost: i === 0,
+          }));
+          client.send(MSG.event, {
+            type: 'lobby',
+            seq: this.seq,
+            seats,
+            canStart: this.seats.length === this.options.playerCount && this.seats.every((s) => s.ready),
+            you: seat,
+          });
+          return;
+        }
         this.sendSnapshot(client);
         return;
       case 'react':

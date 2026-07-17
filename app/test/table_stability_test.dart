@@ -4,6 +4,8 @@
 /// viewports without RenderFlex overflows.
 library;
 
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,11 +21,18 @@ class FakeGameController extends GameController {
   FakeGameController(this._initial);
 
   final GameUiState _initial;
+  final _fakeEvents = StreamController<TableEvent>.broadcast();
 
   @override
   GameUiState build() => _initial;
 
+  @override
+  Stream<TableEvent> get tableEvents => _fakeEvents.stream;
+
   void setState(GameUiState next) => state = next;
+
+  /// Injects a one-shot table event (e.g. a reaction) as the server would.
+  void emitEvent(TableEvent event) => _fakeEvents.add(event);
 }
 
 GameUiState lobbyState() => const GameUiState(
@@ -39,6 +48,8 @@ GameUiState lobbyState() => const GameUiState(
 GameUiState playingState({
   int playerCount = 4,
   List<DealResult>? lastDealResults,
+  int myScore = 0,
+  List<int> myWonPile = const [],
 }) =>
     GameUiState(
       roomPhase: RoomPhase.playing,
@@ -59,10 +70,11 @@ GameUiState playingState({
             connected: true,
             handCount: 6,
             wonCount: s.isEven ? 2 : 0,
-            score: s,
+            score: s == 0 ? myScore : s,
           ),
       ],
       myHand: const [0, 3, 7, 12, 20, 30], // 6 cards
+      myWonPile: myWonPile,
       trick: TrickState(
         leader: 1,
         k: 1,
@@ -180,5 +192,42 @@ void main() {
         reason: 'six result rows on a 400x500 viewport must scroll, '
             'not overflow');
     expect(find.text('Итоги раздачи'), findsOneWidget);
+  });
+
+  testWidgets(
+      'my area with two-digit score/взятки and a reaction bubble fits a '
+      '212px-wide viewport', (tester) async {
+    tester.view.physicalSize = const Size(212, 700);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final errors = <FlutterErrorDetails>[];
+    final oldOnError = FlutterError.onError;
+    FlutterError.onError = errors.add;
+    addTearDown(() => FlutterError.onError = oldOnError);
+
+    // Two-digit score and взятки — the widest the chips get in a real game.
+    final fake = await pumpTable(
+      tester,
+      playingState(
+        myScore: 24,
+        myWonPile: [for (var i = 0; i < 12; i++) i],
+      ),
+    );
+    await pumpFrames(tester, frames: 3);
+
+    // A reaction bubble on my own seat adds the transient emoji to the row.
+    fake.emitEvent(const TableEvent('reaction', {'seat': 0, 'emoji': 'goat'}));
+    await pumpFrames(tester);
+
+    expect(tester.takeException(), isNull);
+    expect(
+      errors.map((e) => e.exceptionAsString()),
+      isEmpty,
+      reason: 'score 24 + 12 взяток + reaction bubble must shrink, '
+          'not overflow, at 212px',
+    );
+    expect(find.text('Взятки: 12'), findsOneWidget);
+    expect(find.text('🐐'), findsWidgets);
   });
 }

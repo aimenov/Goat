@@ -39,6 +39,9 @@ class GameController extends Notifier<GameUiState> {
     state = const GameUiState(roomPhase: RoomPhase.lobby);
     _sub = room.messages.listen(_onMessage);
     room.onClose.then((code) {
+      // A stale room's close (after a re-attach) must not flip the healthy
+      // session that replaced it into "reconnecting".
+      if (!identical(_room, room)) return;
       if (code == 4000 || state.roomPhase == RoomPhase.gameOver) return;
       state = state.copyWith(roomPhase: RoomPhase.reconnecting);
     });

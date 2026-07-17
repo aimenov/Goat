@@ -45,6 +45,8 @@ const forceCpu =
 
 if (forceCpu) {
   console.warn('Козёл: rendering in CPU mode (WebGL unavailable or previously failed on this GPU).');
+  // The flag lives in sessionStorage, so it survives reloads of this tab only.
+  console.info('Козёл: CPU-режим действует до конца сессии вкладки — закройте вкладку и откройте игру заново, чтобы снова попробовать GPU-рендеринг.');
 }
 
 _flutter.loader.load({

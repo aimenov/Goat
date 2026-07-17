@@ -118,7 +118,7 @@ test('3p: discard does not end the trick; leader END gives cards to last beater'
   assert.equal(r.state.phase, 'TRICK_LEAD');
 });
 
-test('nobody beats: leader wins their own lead including all face-down discards', () => {
+test('nobody beats: trick auto-resolves to the leader — no self-beat, no decision phase', () => {
   const lead = cardOf(3, 8); // trump A♥
   const s0 = makeState({
     playerCount: 3,
@@ -131,12 +131,15 @@ test('nobody beats: leader wins their own lead including all face-down discards'
   });
   let r = apply(s0, { type: 'LEAD', seat: 0, cards: [lead] });
   r = apply(r.state, { type: 'DISCARD', seat: 1, cards: [cardOf(0, 0)] });
+  // the last discard closes the circle: the newest set is the leader's own,
+  // so the trick resolves immediately (a player can never beat his own cards)
   r = apply(r.state, { type: 'DISCARD', seat: 2, cards: [cardOf(0, 1)] });
-  r = apply(r.state, { type: 'END_TRICK', seat: 0 });
   const trickEnd = r.events.find((e) => e.type === 'trickEnded');
   assert.ok(trickEnd && trickEnd.type === 'trickEnded');
   assert.equal(trickEnd.winner, 0);
   assert.equal(r.state.players[0]!.won.length, 3);
+  assert.equal(r.state.phase, 'TRICK_LEAD');
+  assert.equal(r.state.trick!.leader, 0);
 });
 
 test('leader may beat the newest set, starting another circle', () => {
@@ -160,9 +163,9 @@ test('leader may beat the newest set, starting another circle', () => {
   assert.equal(r.state.phase, 'TRICK_RESPOND');
   assert.equal(r.state.trick!.turn, 1);
 
-  // seat 1 discards; back to leader; leader ends; leader owns the newest set → takes all
+  // seat 1 discards; the circle returns to the leader whose OWN set is
+  // newest → auto-resolve (no self-beat), leader takes all
   r = apply(r.state, { type: 'DISCARD', seat: 1, cards: [cardOf(2, 1)] });
-  r = apply(r.state, { type: 'END_TRICK', seat: 0 });
   const trickEnd = r.events.find((e) => e.type === 'trickEnded');
   assert.ok(trickEnd && trickEnd.type === 'trickEnded');
   assert.equal(trickEnd.winner, 0);

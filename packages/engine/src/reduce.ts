@@ -183,11 +183,25 @@ export function reduce(prev: GameState, action: GameAction): ReduceResult {
   return { ok: true, state, events };
 }
 
-/** After a lead / beat / discard: pass the turn clockwise; back at the leader = leader decision. */
+/**
+ * After a lead / beat / discard: pass the turn clockwise; back at the leader =
+ * leader decision — UNLESS the newest set is the leader's own (nobody beat):
+ * a player can never beat his own cards (user ruling), so the trick
+ * auto-resolves and the leader takes everything.
+ */
 function advanceTurn(state: GameState, events: EngineEvent[]): void {
   const trick = state.trick!;
   trick.turn = nextSeat(state, trick.turn);
-  state.phase = trick.turn === trick.leader ? 'TRICK_LEADER_DECISION' : 'TRICK_RESPOND';
+  if (trick.turn === trick.leader) {
+    const newestOwner = trick.sets[trick.sets.length - 1]!.owner;
+    if (newestOwner === trick.leader) {
+      resolveTrick(state, events);
+      return;
+    }
+    state.phase = 'TRICK_LEADER_DECISION';
+  } else {
+    state.phase = 'TRICK_RESPOND';
+  }
   events.push({ type: 'turn', seat: trick.turn, phase: state.phase });
 }
 
@@ -289,6 +303,15 @@ export function assertInvariants(state: GameState, expectedTotal: number = DECK_
   const total = totalCards(state);
   if (total !== expectedTotal) {
     throw new Error(`card conservation violated: ${total} != ${expectedTotal}`);
+  }
+  // No self-beat (user ruling): the leader-decision phase only exists when
+  // the newest set belongs to an opponent.
+  if (state.phase === 'TRICK_LEADER_DECISION') {
+    const trick = state.trick!;
+    const newestOwner = trick.sets[trick.sets.length - 1]?.owner;
+    if (newestOwner === trick.leader) {
+      throw new Error('leader facing own set: trick should have auto-resolved');
+    }
   }
 }
 

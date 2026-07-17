@@ -30,12 +30,13 @@ Canonical rules for this implementation, confirmed by the game's author. The eng
      beats anything — including the trump ace — and can never itself be beaten.
    - **Discard** k cards of their choice face-down onto the table. This does NOT end the trick.
    Declining is voluntary: a player who could beat may discard instead.
-3. **Leader decision.** When the turn returns to the original leader, they either:
-   - **End the trick** (no discard required): the owner of the most recent beat set (or the
-     leader themselves, if nobody beat) takes ALL table cards — led, beaten, and every
-     face-down discard — into their won pile; or
-   - **Beat the newest set themselves**, starting another full circle (the end-decision always
-     comes back to the leader).
+3. **Leader decision.** A player can never beat his own cards. When the turn returns to the
+   original leader:
+   - If the newest set is the **leader's own** (nobody beat this circle), the trick resolves
+     **automatically** — the leader takes ALL table cards (led, beaten, and every face-down
+     discard) into their won pile. There is no decision.
+   - If the newest set belongs to an **opponent**, the leader chooses: **end the trick**
+     (that opponent takes everything) or **beat the newest set**, starting another full circle.
 4. Won piles: a player may review their own pile at any time (including face-down cards they
    collected). Piles are never shown to other players; only counts/points are public at deal end.
 

@@ -16,6 +16,10 @@ The trick travels **full circle back to the leader**:
   face-down discard — or **beats the newest set himself**, starting another circle. The
   end-decision always returns to the leader.
 - Declining (discarding) is voluntary — a player who could beat may discard instead.
+- **No self-beat (later ruling, 2026-07-17):** a player can never beat his own cards. If the
+  circle returns to the leader and the newest set is his own (nobody beat), the trick
+  auto-resolves — the leader takes everything, with no decision phase. The leader's end-or-beat
+  choice exists only when the newest set belongs to an opponent.
 
 Engine decision points are therefore: `TRICK_LEAD`, `TRICK_RESPOND` (beat | discard),
 `TRICK_LEADER_DECISION` (end | beat), `GAME_OVER`.

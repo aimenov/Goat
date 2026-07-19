@@ -11,6 +11,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../core/cards.dart';
+import '../../core/render_mode.dart';
 import '../theme/tokens.dart';
 import 'suit_paths.dart';
 
@@ -82,13 +83,17 @@ class _CardFaceState extends State<CardFace> {
                   color: Tokens.suitBlack.withValues(alpha: 0.2),
                   width: 0.8,
                 ),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x59000000), // black @ 0.35 — the resting shadow
-              blurRadius: 4,
-              offset: Offset(0, 2),
-            ),
-          ],
+          // CPU mode drops all card shadows — blurs are the priciest
+          // software-raster op and cards are the most numerous widget.
+          boxShadow: cpuRenderMode
+              ? null
+              : const [
+                  BoxShadow(
+                    color: Color(0x59000000), // black @ 0.35 — the resting shadow
+                    blurRadius: 4,
+                    offset: Offset(0, 2),
+                  ),
+                ],
         ),
         child: _faceContent(height, radius, shohaCard),
       );
@@ -115,7 +120,9 @@ class _CardFaceState extends State<CardFace> {
         // sigma/offset per card multiplies first-use blur-pipeline variants
         // during the deal burst on WebGL — the select/hover lift still reads
         // via the border + translate. Native keeps the animated shadow.
-        boxShadow: kIsWeb
+        boxShadow: cpuRenderMode
+            ? null
+            : kIsWeb
             ? const [
                 BoxShadow(
                   color: Color(0x59000000), // black @ 0.35
@@ -184,11 +191,14 @@ class _CardFaceState extends State<CardFace> {
                 bottom: height * 0.17,
                 child: Container(
                   padding: EdgeInsets.symmetric(vertical: height * 0.012),
-                  decoration: const BoxDecoration(
-                    gradient: LinearGradient(
-                      colors: [Tokens.gold200, Tokens.gold500],
-                    ),
-                  ),
+                  decoration: cpuRenderMode
+                      // Solid gold ribbon: no gradient fill in CPU mode.
+                      ? const BoxDecoration(color: Tokens.gold400)
+                      : const BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [Tokens.gold200, Tokens.gold500],
+                          ),
+                        ),
                   child: Text(
                     'ШОХА',
                     textAlign: TextAlign.center,
@@ -260,15 +270,18 @@ class CardFacePainter extends CustomPainter {
     final h = size.height;
     final radius = h * 0.09;
 
-    // 1. Ivory gradient fill.
+    // 1. Ivory fill — gradient on GPU, flat in CPU mode (gradient fills are
+    //    per-pixel shader evaluations in software).
     canvas.drawRRect(
       RRect.fromRectAndRadius(Offset.zero & size, Radius.circular(radius)),
-      Paint()
-        ..shader = const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Tokens.ivory, Tokens.ivoryWarm],
-        ).createShader(Offset.zero & size),
+      cpuRenderMode
+          ? (Paint()..color = Tokens.ivory)
+          : (Paint()
+              ..shader = const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Tokens.ivory, Tokens.ivoryWarm],
+              ).createShader(Offset.zero & size)),
     );
 
     // 2. Inner hairline.
@@ -382,7 +395,7 @@ class CardBack extends StatelessWidget {
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(radius),
         border: Border.all(color: Colors.black38, width: 0.8),
-        boxShadow: const [Tokens.shadowCard],
+        boxShadow: cpuRenderMode ? null : const [Tokens.shadowCard],
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(radius),
@@ -416,15 +429,17 @@ class _LatticePainter extends CustomPainter {
     final w = size.width;
     final h = size.height;
 
-    // 1. Base: vertical deep-green gradient.
+    // 1. Base: vertical deep-green gradient (flat fill in CPU mode).
     canvas.drawRect(
       Offset.zero & size,
-      Paint()
-        ..shader = const LinearGradient(
-          begin: Alignment.topCenter,
-          end: Alignment.bottomCenter,
-          colors: [Tokens.felt500, Tokens.felt800],
-        ).createShader(Offset.zero & size),
+      cpuRenderMode
+          ? (Paint()..color = Tokens.felt600)
+          : (Paint()
+              ..shader = const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [Tokens.felt500, Tokens.felt800],
+              ).createShader(Offset.zero & size)),
     );
 
     // 2. Gold diagonal lattice.

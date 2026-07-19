@@ -9,6 +9,7 @@ import 'dart:math' show pi;
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
+import '../../../core/render_mode.dart';
 import '../../../shared/theme/tokens.dart';
 
 class FeltSweep extends StatefulWidget {
@@ -20,23 +21,34 @@ class FeltSweep extends StatefulWidget {
 
 class _FeltSweepState extends State<FeltSweep>
     with SingleTickerProviderStateMixin {
-  late final AnimationController _controller = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 700),
-  );
+  // Nullable, not `late final`: in CPU mode no controller must ever exist —
+  // a lazy field would be created on first touch in dispose(), where
+  // createTicker's ancestor lookup throws during unmount.
+  AnimationController? _controller;
   bool _done = false;
 
   @override
   void initState() {
     super.initState();
-    _controller.forward().whenCompleteOrCancel(() {
+    // CPU mode: a full-screen band repainting every frame right at deal
+    // start is the worst software-raster moment — skip the sweep entirely
+    // (no controller is created; build stays SizedBox.shrink).
+    if (cpuRenderMode) {
+      _done = true;
+      return;
+    }
+    final controller = _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 700),
+    );
+    controller.forward().whenCompleteOrCancel(() {
       if (mounted) setState(() => _done = true);
     });
   }
 
   @override
   void dispose() {
-    _controller.dispose();
+    _controller?.dispose();
     super.dispose();
   }
 
@@ -47,7 +59,9 @@ class _FeltSweepState extends State<FeltSweep>
       child: RepaintBoundary(
         child: CustomPaint(
           size: Size.infinite,
-          painter: _SweepPainter(animation: _controller),
+          // Non-null here: _done is true from initState whenever no
+          // controller was created.
+          painter: _SweepPainter(animation: _controller!),
         ),
       ),
     );

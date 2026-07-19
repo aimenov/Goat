@@ -1,21 +1,37 @@
 /// Wires a [GameRoom] message stream into [GameUiState] and exposes intents.
-/// Events drive incremental updates (and, later, animations); snapshots are
+/// Events drive incremental updates (and animations); snapshots are
 /// authoritative full replacements (join, reconnect, own turn, seq gap).
+///
+/// A FIFO presentation queue paces how server batches (which land in one
+/// frame) become visible: seq bookkeeping happens at receipt, but most
+/// messages apply after a scheduled hold (see `pacing.dart`) so tricks, deal
+/// summaries and game over each get a moment on screen.
 library;
 
 import 'dart:async';
+import 'dart:collection';
 import 'dart:math';
 
+import 'package:clock/clock.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../net/transport.dart';
 import 'models.dart';
+import 'pacing.dart';
 
 /// Transient one-shot events the UI reacts to (animations, toasts, reactions).
 class TableEvent {
   final String type;
   final Map<String, Object?> data;
   const TableEvent(this.type, this.data);
+}
+
+/// One deferred message in the presentation queue.
+class _PendingEntry {
+  final bool isSnapshot;
+  final Map<String, Object?> payload;
+  final DateTime dueAt;
+  const _PendingEntry(this.isSnapshot, this.payload, this.dueAt);
 }
 
 class GameController extends Notifier<GameUiState> {
@@ -26,6 +42,17 @@ class GameController extends Notifier<GameUiState> {
   final _tableEvents = StreamController<TableEvent>.broadcast();
   final _rejections = StreamController<String>.broadcast();
 
+  // Presentation queue: entries apply in FIFO order at their dueAt.
+  final _queue = Queue<_PendingEntry>();
+  Timer? _drainTimer;
+  DateTime? _queueReadyAt; // dueAt of the last enqueued entry
+  String? _lastQueuedType; // event type of the last enqueued (non-bypass) event
+  bool _flushOnSnapshot = false; // a resync was requested; next snapshot flushes
+
+  /// These reflect out-of-band reality (chat-like or connection-state), not
+  /// game progression — they must never wait behind a paced trick.
+  static const _bypassTypes = {'lobby', 'reaction', 'playerConnection', 'rematch'};
+
   Stream<TableEvent> get tableEvents => _tableEvents.stream;
   Stream<String> get rejections => _rejections.stream;
 
@@ -34,6 +61,7 @@ class GameController extends Notifier<GameUiState> {
 
   void attach(GameRoom room) {
     _sub?.cancel();
+    _resetQueue();
     _room = room;
     _lastSeq = -1;
     state = const GameUiState(roomPhase: RoomPhase.lobby);
@@ -42,6 +70,10 @@ class GameController extends Notifier<GameUiState> {
       // A stale room's close (after a re-attach) must not flip the healthy
       // session that replaced it into "reconnecting".
       if (!identical(_room, room)) return;
+      // Apply anything still held for pacing before deciding the phase: a
+      // close during the gameEnded hold must not flip a finished game into
+      // "reconnecting".
+      _flushQueue();
       if (code == 4000 || state.roomPhase == RoomPhase.gameOver) return;
       state = state.copyWith(roomPhase: RoomPhase.reconnecting);
     });
@@ -50,6 +82,7 @@ class GameController extends Notifier<GameUiState> {
 
   void detach() {
     _sub?.cancel();
+    _resetQueue();
     _room = null;
     state = const GameUiState();
   }
@@ -57,6 +90,9 @@ class GameController extends Notifier<GameUiState> {
   // ------------------------------------------------------------- intents
 
   void send(String type, Map<String, Object?> payload) {
+    // Every resync request (attach, seq gap, rejected ack) makes the next
+    // snapshot authoritative: it must flush the queue and apply instantly.
+    if (type == 'resync') _flushOnSnapshot = true;
     _room?.send('intent', {'type': type, ...payload});
   }
 
@@ -98,9 +134,9 @@ class GameController extends Notifier<GameUiState> {
     final (type, payload) = message;
     switch (type) {
       case 'snapshot':
-        _applySnapshot(asMap(payload));
+        _receiveSnapshot(asMap(payload));
       case 'event':
-        _applyEvent(asMap(payload));
+        _receiveEvent(asMap(payload));
       case 'ack':
         final m = asMap(payload);
         if (m['ok'] != true) {
@@ -112,10 +148,108 @@ class GameController extends Notifier<GameUiState> {
     }
   }
 
-  void _applySnapshot(Map<String, Object?> m) {
+  // -------------------------------------------------- presentation queue
+
+  /// Seq bookkeeping happens here, at receipt; presentation may lag behind.
+  void _receiveEvent(Map<String, Object?> m) {
+    final type = '${m['type']}';
+    final seq = (m['seq'] as num?)?.toInt() ?? _lastSeq;
+    if (seq > _lastSeq + 1 && type != 'lobby' && type != 'reaction') {
+      send('resync', {});
+    }
+    _lastSeq = max(_lastSeq, seq);
+    if (_bypassTypes.contains(type)) {
+      _applyEventBody(m);
+    } else {
+      _enqueue(isSnapshot: false, type: type, payload: m);
+    }
+  }
+
+  void _receiveSnapshot(Map<String, Object?> m) {
+    _lastSeq = max(_lastSeq, (m['seq'] as num).toInt());
+    if (_flushOnSnapshot) {
+      // Requested resync: the snapshot supersedes anything still queued.
+      _resetQueue();
+      _applySnapshotBody(m);
+    } else {
+      // Unrequested (own-turn) snapshot: trail the batch it arrived with so
+      // `legal` never appears before the paused turn event.
+      _enqueue(isSnapshot: true, type: null, payload: m);
+    }
+  }
+
+  void _enqueue({required bool isSnapshot, required String? type, required Map<String, Object?> payload}) {
+    final now = clock.now();
+    var base = _queueReadyAt ?? now;
+    if (base.isBefore(now)) base = now;
+    final gap = isSnapshot ? 0 : _gapMs(type!, _lastQueuedType);
+    var dueAt = base.add(Duration(milliseconds: gap));
+    // Cap total presentation lag so the client never trails the server by
+    // more than maxQueueLagMs under a rapid event chain.
+    final cap = now.add(const Duration(milliseconds: maxQueueLagMs));
+    if (dueAt.isAfter(cap)) dueAt = cap;
+    _queue.add(_PendingEntry(isSnapshot, payload, dueAt));
+    _queueReadyAt = dueAt;
+    if (!isSnapshot) _lastQueuedType = type;
+    _scheduleDrain();
+  }
+
+  /// Pause inserted before [type] given the previously enqueued [prev].
+  int _gapMs(String type, String? prev) {
+    if (type == 'trickEnded') return beatHoldMs; // let the full trick be seen
+    if (prev == 'trickEnded') return postTrickMs; // breath after the vacuum
+    if (type == 'dealStarted' && prev == 'dealEnded') return dealTransitionMs;
+    if (type == 'gameEnded') return gameOverMs; // final summary stays visible
+    return 0;
+  }
+
+  void _scheduleDrain() {
+    if (_drainTimer != null || _queue.isEmpty) return;
+    final wait = _queue.first.dueAt.difference(clock.now());
+    if (wait <= Duration.zero) {
+      _drain();
+    } else {
+      _drainTimer = Timer(wait, () {
+        _drainTimer = null;
+        _drain();
+      });
+    }
+  }
+
+  void _drain() {
+    while (_queue.isNotEmpty && !_queue.first.dueAt.isAfter(clock.now())) {
+      _applyEntry(_queue.removeFirst());
+    }
+    _scheduleDrain();
+  }
+
+  /// Applies everything still pending, ignoring dueAt (socket close).
+  void _flushQueue() {
+    _drainTimer?.cancel();
+    _drainTimer = null;
+    while (_queue.isNotEmpty) {
+      _applyEntry(_queue.removeFirst());
+    }
+    _queueReadyAt = null;
+    _lastQueuedType = null;
+  }
+
+  void _resetQueue() {
+    _drainTimer?.cancel();
+    _drainTimer = null;
+    _queue.clear();
+    _queueReadyAt = null;
+    _lastQueuedType = null;
+    _flushOnSnapshot = false;
+  }
+
+  void _applyEntry(_PendingEntry e) =>
+      e.isSnapshot ? _applySnapshotBody(e.payload) : _applyEventBody(e.payload);
+
+  // ------------------------------------------------------- state updates
+
+  void _applySnapshotBody(Map<String, Object?> m) {
     final view = asMap(m['view']);
-    final seq = (m['seq'] as num).toInt();
-    _lastSeq = seq;
     final nicknames = (m['nicknames'] as List? ?? const []).map((e) => '$e').toList();
     final connected = (m['connected'] as List? ?? const []).map((e) => e == true).toList();
     final seatViews = (view['seats'] as List? ?? const []).map((raw) {
@@ -153,13 +287,8 @@ class GameController extends Notifier<GameUiState> {
     );
   }
 
-  void _applyEvent(Map<String, Object?> m) {
+  void _applyEventBody(Map<String, Object?> m) {
     final type = '${m['type']}';
-    final seq = (m['seq'] as num?)?.toInt() ?? _lastSeq;
-    if (seq > _lastSeq + 1 && type != 'lobby' && type != 'reaction') {
-      send('resync', {});
-    }
-    _lastSeq = max(_lastSeq, seq);
     _tableEvents.add(TableEvent(type, m));
 
     switch (type) {

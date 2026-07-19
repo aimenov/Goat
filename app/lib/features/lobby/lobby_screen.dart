@@ -8,6 +8,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/net/api.dart';
+import '../../core/render_mode.dart';
 import '../../core/services/sound.dart';
 import '../../core/session.dart';
 import '../../shared/cards/suit_paths.dart';
@@ -16,6 +17,10 @@ import '../../shared/theme/tokens.dart';
 import '../../shared/widgets/gold_button.dart';
 import '../../shared/widgets/hover_lift.dart';
 import '../game/anim/motion_widgets.dart';
+
+/// Whether the CPU-render-mode hint was already shown this app session —
+/// module-level so revisiting the lobby doesn't repeat it.
+bool _cpuHintShown = false;
 
 class LobbyScreen extends ConsumerStatefulWidget {
   const LobbyScreen({super.key});
@@ -45,6 +50,22 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
     super.initState();
     _refresh();
     _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) => _refresh(silent: true));
+    if (cpuRenderMode && !_cpuHintShown) {
+      _cpuHintShown = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            duration: Duration(seconds: 8),
+            content: Text(
+              'Игра работает в режиме совместимости — графика упрощена и '
+              'может подтормаживать. Закройте вкладку и откройте игру '
+              'заново, чтобы вернуть аппаратное ускорение.',
+            ),
+          ),
+        );
+      });
+    }
   }
 
   @override

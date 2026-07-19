@@ -50,6 +50,8 @@ GameUiState playingState({
   List<DealResult>? lastDealResults,
   int myScore = 0,
   List<int> myWonPile = const [],
+  LegalActions? legal,
+  int turn = 2,
 }) =>
     GameUiState(
       roomPhase: RoomPhase.playing,
@@ -78,13 +80,13 @@ GameUiState playingState({
       trick: TrickState(
         leader: 1,
         k: 1,
-        turn: 2,
+        turn: turn,
         sets: const [
           TableSet(owner: 1, kind: 'lead', cards: [14]),
         ],
         discards: const [],
       ),
-      legal: null, // waiting on someone else's move
+      legal: legal, // null: waiting on someone else's move
       deadline: DateTime.now().millisecondsSinceEpoch + 30000,
       lastDealResults: lastDealResults,
     );
@@ -140,6 +142,31 @@ void main() {
           'lobby→playing transition',
     );
     expect(find.text('Раздача 1'), findsOneWidget);
+
+    // Full circle back to the leader: the leaderDecision action bar
+    // (caption + «Побить всё» + «Закрыть круг») must mount without
+    // disturbing the keyed Column either.
+    fake.setState(playingState(
+      turn: 0,
+      legal: const LegalActions(
+        kind: 'leaderDecision',
+        canBeat: true,
+        beatMatrix: {
+          14: [30],
+        },
+      ),
+    ));
+    await pumpFrames(tester);
+
+    expect(tester.takeException(), isNull);
+    expect(
+      errors.map((e) => e.exceptionAsString()),
+      isEmpty,
+      reason: 'the playing→leaderDecision transition must not disturb the '
+          'anchored Column',
+    );
+    expect(find.text('Побить самому'), findsNothing);
+    expect(find.text('Закрыть круг'), findsOneWidget);
   });
 
   testWidgets('table lays out on a short viewport without overflow',

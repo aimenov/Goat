@@ -14,6 +14,7 @@ import '../../core/cards.dart';
 import '../../core/game/game_controller.dart';
 import '../../core/game/models.dart';
 import '../../core/net/transport.dart';
+import '../../core/render_mode.dart';
 import '../../core/services/sound.dart';
 import '../../core/session.dart';
 import '../../shared/cards/card_face.dart';
@@ -30,6 +31,7 @@ import 'anim/flight_layer.dart';
 import 'anim/motion_widgets.dart';
 import 'anim/table_anchors.dart';
 import 'anim/table_fx.dart';
+import 'drag_play.dart';
 import 'selection.dart';
 
 const _reactionIds = ['thumbs_up', 'laugh', 'shock', 'goat', 'fire', 'cry'];
@@ -195,8 +197,16 @@ class _TableScreenState extends ConsumerState<TableScreen> {
       _selected.clear();
       _beatAssignment.clear();
       final legal = next.legal;
-      _beatMode = legal != null && legal.kind == 'respond' && legal.canBeat;
-      _beatTarget = _beatMode ? legal?.beatMatrix.keys.firstOrNull : null;
+      // Beat affordance primes for respond AND leaderDecision (the leader
+      // beats the table set by simply playing cards — no mode switch). The
+      // leader keeps no preselected target, so the hand stays undimmed
+      // until they engage (tap a table card or drag one of their own).
+      _beatMode = legal != null &&
+          legal.canBeat &&
+          (legal.kind == 'respond' || legal.kind == 'leaderDecision');
+      _beatTarget = _beatMode && legal?.kind == 'respond'
+          ? legal?.beatMatrix.keys.firstOrNull
+          : null;
       dirty = true;
     }
     if (next.deadline != (previous?.deadline ?? 0) && next.deadline > 0) {
@@ -374,27 +384,32 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     if (!state.isMyTurn || legal == null) return;
     HapticFeedback.selectionClick();
     _sound.play(Sfx.tapSelect);
-    setState(() {
-      if (_beatModeActive(state)) {
-        // Tapping an assigned card takes it back.
-        for (final entry in _beatAssignment.entries) {
-          if (entry.value == card) {
+    if (_beatModeActive(state)) {
+      // Tapping an assigned card takes it back.
+      for (final entry in _beatAssignment.entries) {
+        if (entry.value == card) {
+          setState(() {
             _beatAssignment.remove(entry.key);
             _beatTarget = entry.key;
-            return;
-          }
+          });
+          return;
         }
-        final target = _beatTarget;
-        if (target == null) return;
-        final options = legal.beatMatrix[target] ?? const <int>[];
-        if (!options.contains(card)) return;
+      }
+      final target = _beatTarget;
+      if (target == null) return;
+      final options = legal.beatMatrix[target] ?? const <int>[];
+      if (!options.contains(card)) return;
+      setState(() {
         _beatAssignment[target] = card;
         _beatTarget = _firstUnassignedTarget(legal);
-      } else if (legal.kind == 'lead' ||
-          (legal.kind == 'respond' && !_beatMode)) {
+      });
+      _maybeAutoSend(legal);
+    } else if (legal.kind == 'lead' ||
+        (legal.kind == 'respond' && !_beatMode)) {
+      setState(() {
         if (!_selected.remove(card)) _selected.add(card);
-      }
-    });
+      });
+    }
   }
 
   void _autoAssign(LegalActions legal) {
@@ -406,6 +421,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
         ..addAll(pairing);
       _beatTarget = null;
     });
+    _maybeAutoSend(legal);
   }
 
   void _sendBeat(GameController controller) {
@@ -417,6 +433,138 @@ class _TableScreenState extends ConsumerState<TableScreen> {
       _beatTarget = null;
       _beatMode = false;
     });
+  }
+
+  /// Sends the beat the moment every target has an assigned card — there is
+  /// no confirm button anymore; tap and drag assignments both land here.
+  void _maybeAutoSend(LegalActions legal) {
+    if (legal.beatMatrix.isNotEmpty &&
+        _beatAssignment.length == legal.beatMatrix.length) {
+      _sendBeat(ref.read(gameControllerProvider.notifier));
+    }
+  }
+
+  /// Assigns [card] to beat [target] (drop on a table card or a resolved
+  /// center drop), advances the target cursor and maybe auto-sends.
+  void _assignBeat(LegalActions legal, int target, int card) {
+    HapticFeedback.selectionClick();
+    _sound.play(Sfx.tapSelect);
+    setState(() {
+      _beatAssignment[target] = card;
+      _beatTarget = _firstUnassignedTarget(legal);
+    });
+    _maybeAutoSend(legal);
+  }
+
+  // ----------------------------------------------------------- drag intents
+
+  /// Whether a hand card may start a drag in the current mode.
+  bool _canDragCard(GameUiState state, int card) {
+    final legal = state.legal;
+    if (!state.isMyTurn || legal == null) return false;
+    if (_beatModeActive(state)) {
+      if (_beatAssignment.containsValue(card)) return false;
+      for (final options in legal.beatMatrix.values) {
+        if (options.contains(card)) return true;
+      }
+      return false;
+    }
+    if (legal.kind == 'lead') return true;
+    return legal.kind == 'respond' && !_beatMode; // discard mode
+  }
+
+  /// The cards that would fly if [card] were dropped right now — feeds the
+  /// drag feedback stack (whole selection when dragging a selected lead).
+  List<int> _dragPayload(GameUiState state, int card) {
+    final legal = state.legal;
+    if (legal != null && legal.kind == 'lead' && _selected.contains(card)) {
+      final selection = _selected.toList();
+      if (isValidLeadSelection(selection) &&
+          (legal.maxCount <= 0 || selection.length <= legal.maxCount)) {
+        return selection;
+      }
+    }
+    return [card];
+  }
+
+  /// Resolves a lead-mode center drop to the cards to play, or null when the
+  /// drop must bounce: a selected card plays the whole (valid) selection — or
+  /// just itself when the selection is invalid (matching the single-card drag
+  /// feedback [_dragPayload] shows in that case) — a free card alone plays
+  /// itself, and an outside card joins the selection only if the union stays
+  /// a legal lead.
+  List<int>? _leadDropSelection(LegalActions legal, int card) {
+    bool fits(List<int> sel) =>
+        isValidLeadSelection(sel) &&
+        (legal.maxCount <= 0 || sel.length <= legal.maxCount);
+    if (_selected.isEmpty) return fits([card]) ? [card] : null;
+    final selection = _selected.toList();
+    if (_selected.contains(card)) {
+      if (fits(selection)) return selection;
+      return fits([card]) ? [card] : null;
+    }
+    final union = [...selection, card];
+    return fits(union) ? union : null;
+  }
+
+  /// Beat-mode center drop: the active target if [card] can beat it, else
+  /// the first unassigned target it beats, else null (bounce).
+  int? _resolveCenterBeatTarget(LegalActions legal, int card) {
+    final active = _beatTarget;
+    if (active != null &&
+        !_beatAssignment.containsKey(active) &&
+        (legal.beatMatrix[active] ?? const <int>[]).contains(card)) {
+      return active;
+    }
+    for (final entry in legal.beatMatrix.entries) {
+      if (_beatAssignment.containsKey(entry.key)) continue;
+      if (entry.value.contains(card)) return entry.key;
+    }
+    return null;
+  }
+
+  /// Whether the center zone would accept [card] (also gates the gold veil).
+  bool _centerWillAccept(GameUiState state, int card) {
+    final legal = state.legal;
+    if (!state.isMyTurn || legal == null) return false;
+    if (_beatModeActive(state)) {
+      return _resolveCenterBeatTarget(legal, card) != null;
+    }
+    if (legal.kind == 'lead') return _leadDropSelection(legal, card) != null;
+    if (legal.kind == 'respond' && !_beatMode) {
+      return !_selected.contains(card) &&
+          _selected.length < legal.discardCount;
+    }
+    return false;
+  }
+
+  /// Center drop: leads, resolves a beat target, or collects a discard —
+  /// always through the same fx + controller paths as the buttons (the
+  /// suppression map stays armed for the echoing server event).
+  void _onCenterDrop(GameUiState state, int card) {
+    final legal = state.legal;
+    if (!state.isMyTurn || legal == null) return;
+    final controller = ref.read(gameControllerProvider.notifier);
+    if (_beatModeActive(state)) {
+      final target = _resolveCenterBeatTarget(legal, card);
+      if (target != null) _assignBeat(legal, target, card);
+    } else if (legal.kind == 'lead') {
+      final selection = _leadDropSelection(legal, card);
+      if (selection == null) return;
+      _sound.play(Sfx.buttonPress);
+      _fx.playMyLead(selection); // optimistic: flight starts now
+      controller.lead(selection);
+      setState(_selected.clear);
+    } else if (legal.kind == 'respond' && !_beatMode) {
+      _sound.play(Sfx.tapSelect);
+      setState(() => _selected.add(card));
+      if (_selected.length == legal.discardCount) {
+        _sound.play(Sfx.buttonPress);
+        _fx.playMyDiscard(_selected.length); // optimistic flight
+        controller.discard(_selected.toList());
+        setState(_selected.clear);
+      }
+    }
   }
 
   // ----------------------------------------------------------- build
@@ -655,18 +803,24 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                       vertical: 10,
                     ),
                     decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Tokens.gold200, Tokens.gold500],
-                      ),
+                      // CPU mode: solid fill, no drop shadow.
+                      gradient: cpuRenderMode
+                          ? null
+                          : const LinearGradient(
+                              colors: [Tokens.gold200, Tokens.gold500],
+                            ),
+                      color: cpuRenderMode ? Tokens.gold400 : null,
                       borderRadius: BorderRadius.circular(Tokens.r14),
                       border: Border.all(color: Tokens.gold600, width: 1),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Colors.black45,
-                          blurRadius: 10,
-                          offset: Offset(0, 3),
-                        ),
-                      ],
+                      boxShadow: cpuRenderMode
+                          ? null
+                          : const [
+                              BoxShadow(
+                                color: Colors.black45,
+                                blurRadius: 10,
+                                offset: Offset(0, 3),
+                              ),
+                            ],
                     ),
                     child: Row(
                       children: [
@@ -1125,6 +1279,41 @@ class _TableScreenState extends ConsumerState<TableScreen> {
   // ----------------------------------------------------------- center
 
   Widget _centerArea(GameUiState state) {
+    // The content is built ONCE outside the DragTarget builder: a drag
+    // hovering over the center must only toggle the gold veil, never
+    // re-lay-out the chains beneath it.
+    final content = _centerContent(state);
+    return DragTarget<int>(
+      onWillAcceptWithDetails: (d) => _centerWillAccept(state, d.data),
+      onAcceptWithDetails: (d) => _onCenterDrop(state, d.data),
+      builder: (context, candidates, _) => Stack(
+        fit: StackFit.expand,
+        children: [
+          content,
+          Positioned.fill(
+            child: IgnorePointer(
+              child: candidates.isEmpty
+                  ? const SizedBox.shrink()
+                  : Padding(
+                      padding: const EdgeInsets.all(8),
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(Tokens.r14),
+                          color: Tokens.gold300.withValues(alpha: 0.08),
+                          border: Border.all(
+                            color: Tokens.gold300.withValues(alpha: 0.45),
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _centerContent(GameUiState state) {
     final trick = state.trick;
     if (state.roomPhase != RoomPhase.playing ||
         trick == null ||
@@ -1206,27 +1395,12 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                     ? RepaintBoundary(
                         child: CardFace(card: chain[i], height: cardH),
                       )
-                    : Container(
-                        decoration: isTargetable
-                            ? BoxDecoration(
-                                borderRadius:
-                                    BorderRadius.circular(cardH * 0.09),
-                                boxShadow: [
-                                  BoxShadow(
-                                    color:
-                                        Tokens.gold300.withValues(alpha: 0.55),
-                                    blurRadius: 8,
-                                    spreadRadius: 1,
-                                  ),
-                                ],
-                              )
-                            : null,
-                        child: CardFace(
-                          card: chain[i],
-                          height: cardH,
-                          selected: _beatTarget == chain[i],
-                          onTap: () => _onTargetTap(state, chain[i]),
-                        ),
+                    : _chainTargetCard(
+                        state,
+                        legal,
+                        chain[i],
+                        cardH,
+                        isTargetable,
                       ),
               ),
             if (assigned != null)
@@ -1245,6 +1419,58 @@ class _TableScreenState extends ConsumerState<TableScreen> {
           ],
         ),
       ),
+    );
+  }
+
+  /// The targetable last card of a chain: tap target and per-target drop
+  /// zone. A drag hovering over it only bumps the existing glow's
+  /// alpha/blur; the inner DragTarget naturally wins over the center zone.
+  Widget _chainTargetCard(
+    GameUiState state,
+    LegalActions? legal,
+    int target,
+    double cardH,
+    bool isTargetable,
+  ) {
+    Widget card(bool hovered) => Container(
+          decoration: isTargetable && !cpuRenderMode
+              ? BoxDecoration(
+                  borderRadius: BorderRadius.circular(cardH * 0.09),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Tokens.gold300
+                          .withValues(alpha: hovered ? 0.85 : 0.55),
+                      blurRadius: hovered ? 14 : 8,
+                      spreadRadius: hovered ? 2 : 1,
+                    ),
+                  ],
+                )
+              : null,
+          // CPU mode replaces the blurred glow with a crisp gold outline;
+          // foregroundDecoration paints over the card without shifting layout.
+          foregroundDecoration: isTargetable && cpuRenderMode
+              ? BoxDecoration(
+                  borderRadius: BorderRadius.circular(cardH * 0.09),
+                  border: Border.all(
+                    color: hovered ? Tokens.gold200 : Tokens.gold300,
+                    width: 2,
+                  ),
+                )
+              : null,
+          child: CardFace(
+            card: target,
+            height: cardH,
+            selected: _beatTarget == target,
+            onTap: () => _onTargetTap(state, target),
+          ),
+        );
+    if (!isTargetable || legal == null) return card(false);
+    return DragTarget<int>(
+      onWillAcceptWithDetails: (d) =>
+          !_beatAssignment.containsKey(target) &&
+          (legal.beatMatrix[target] ?? const <int>[]).contains(d.data),
+      onAcceptWithDetails: (d) => _assignBeat(legal, target, d.data),
+      builder: (context, candidates, _) => card(candidates.isNotEmpty),
     );
   }
 
@@ -1404,14 +1630,15 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                   top: 12,
                   child: Builder(
                     builder: (context) {
+                      final card = hand[i];
                       final dimmed =
-                          assignedCards.contains(hand[i]) ||
-                          (candidates != null && !candidates.contains(hand[i]));
-                      final selected = _selected.contains(hand[i]);
+                          assignedCards.contains(card) ||
+                          (candidates != null && !candidates.contains(card));
+                      final selected = _selected.contains(card);
                       // Per-card boundary: a breathing/hovering card repaints
                       // (or just re-composites) alone, and static cards stay
                       // cached even when IdleLift is disabled.
-                      return RepaintBoundary(
+                      final face = RepaintBoundary(
                         child: IdleLift(
                           // Gentle affordance: playable cards breathe on my
                           // turn. Web skips it: even composited, ~10 cards
@@ -1420,13 +1647,37 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                           enabled: !kIsWeb && state.isMyTurn && !dimmed && !selected,
                           phase: hand.isEmpty ? 0 : i / hand.length,
                           child: CardFace(
-                            card: hand[i],
+                            card: card,
                             height: cardH,
                             selected: selected,
                             dimmed: dimmed,
-                            onTap: () => _onHandTap(state, hand[i]),
+                            onTap: () => _onHandTap(state, card),
                           ),
                         ),
+                      );
+                      // Always-mounted Draggable (stable element shape; only
+                      // maxSimultaneousDrags flips). Vertical affinity: the
+                      // recognizer competes only for vertical motion, so the
+                      // horizontal hand scroll keeps winning sideways swipes.
+                      // Both child slots wrap the same subtree in an Opacity
+                      // so the depth never changes mid-drag.
+                      return Draggable<int>(
+                        data: card,
+                        affinity: Axis.vertical,
+                        maxSimultaneousDrags:
+                            _canDragCard(state, card) ? 1 : 0,
+                        dragAnchorStrategy: pointerDragAnchorStrategy,
+                        onDragStarted: () {
+                          HapticFeedback.selectionClick();
+                          _sound.play(Sfx.tapSelect);
+                        },
+                        feedback: DragCardsFeedback(
+                          cards: _dragPayload(state, card),
+                          cardHeight: cardH,
+                        ),
+                        childWhenDragging:
+                            Opacity(opacity: 0.35, child: face),
+                        child: Opacity(opacity: 1, child: face),
                       );
                     },
                   ),
@@ -1563,7 +1814,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
           ),
         const SizedBox(height: 4),
         if (legal.canBeat && _beatMode)
-          _beatButtons(controller, legal)
+          _beatButtons(legal)
         else
           Row(
             children: [
@@ -1591,9 +1842,8 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     );
   }
 
-  Widget _beatButtons(GameController controller, LegalActions legal) {
+  Widget _beatButtons(LegalActions legal) {
     final targetCount = legal.beatMatrix.length;
-    final complete = targetCount > 0 && _beatAssignment.length == targetCount;
     return Row(
       children: [
         const Expanded(
@@ -1606,11 +1856,18 @@ class _TableScreenState extends ConsumerState<TableScreen> {
           onPressed: () => _autoAssign(legal),
           child: const Text('Авто'),
         ),
-        const SizedBox(width: 8),
-        GoldButton(
-          onPressed: complete ? () => _sendBeat(controller) : null,
-          child: Text('Побить (${_beatAssignment.length}/$targetCount)'),
-        ),
+        // No confirm button: the k-th assignment auto-sends. A passive
+        // progress readout is enough when several targets are pending.
+        if (targetCount > 1) ...[
+          const SizedBox(width: 8),
+          Text(
+            '${_beatAssignment.length}/$targetCount',
+            style: Tokens.numeric.copyWith(
+              fontSize: 13,
+              color: Tokens.gold200,
+            ),
+          ),
+        ],
       ],
     );
   }
@@ -1620,49 +1877,46 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     GameController controller,
     LegalActions legal,
   ) {
-    if (_beatMode && legal.canBeat) {
-      return Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _beatButtons(controller, legal),
-          const SizedBox(height: 4),
-          Align(
-            alignment: Alignment.centerRight,
-            child: TextButton(
-              onPressed: () => setState(() {
-                _beatMode = false;
-                _beatAssignment.clear();
-                _beatTarget = null;
-              }),
-              child: const Text('Отмена'),
-            ),
-          ),
-        ],
-      );
-    }
-    return Row(
+    // No «Побить самому» mode switch anymore: the leader beats the table
+    // set by tapping/dragging cards directly (the k-th one auto-sends), or
+    // closes the circle.
+    final targetCount = legal.beatMatrix.length;
+    final caption = !legal.canBeat
+        ? 'Побить нечем'
+        : _beatAssignment.isEmpty
+            ? 'Можете побить карты на столе — или закройте круг'
+            : 'Побито ${_beatAssignment.length}/$targetCount';
+    final canBeatAll = legal.canBeat && autoPairing(legal.beatMatrix) != null;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Expanded(
-          child: GoldButton(
-            onPressed: () {
-              _sound.play(Sfx.buttonPress);
-              controller.endTrick();
-            },
-            child: const Text('Закрыть круг'),
-          ),
-        ),
-        if (legal.canBeat) ...[
-          const SizedBox(width: 8),
-          Expanded(
-            child: OutlinedButton(
-              onPressed: () => setState(() {
-                _beatMode = true;
-                _beatTarget = _firstUnassignedTarget(legal);
-              }),
-              child: const Text('Побить самому'),
+        Text(caption, style: Tokens.caption),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            if (legal.canBeat) ...[
+              OutlinedButton(
+                onPressed: canBeatAll ? () => _autoAssign(legal) : null,
+                child: const Text('Побить всё'),
+              ),
+              const SizedBox(width: 8),
+            ],
+            Expanded(
+              child: GoldButton(
+                onPressed: () {
+                  _sound.play(Sfx.buttonPress);
+                  setState(() {
+                    _beatAssignment.clear();
+                    _beatTarget = null;
+                  });
+                  controller.endTrick();
+                },
+                child: const Text('Закрыть круг'),
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ],
     );
   }
@@ -1852,7 +2106,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
           decoration: BoxDecoration(
             color: Tokens.surfaceHigh,
             borderRadius: BorderRadius.circular(Tokens.r20),
-            boxShadow: const [Tokens.shadowRaised],
+            boxShadow: cpuRenderMode ? null : const [Tokens.shadowRaised],
           ),
           child: CustomPaint(
             foregroundPainter: const GoldFramePainter(),

@@ -41,7 +41,7 @@ class TableFx {
 
   /// Web gets a slightly looser deal stagger and shorter deal flights: fewer
   /// simultaneous flights raster per frame during the ~24-card burst.
-  static const _dealGap = Duration(milliseconds: kIsWeb ? 65 : 40);
+  static const _dealGap = Duration(milliseconds: kIsWeb ? 95 : 70);
 
   // ---------------------------------------------------------------- events
 
@@ -174,7 +174,7 @@ class TableFx {
         // Only the base differs per platform; the single nextInt(60) draw
         // stays in place so the RNG sequence (and thus every later jitter)
         // is identical across platforms for a given deal seed.
-        duration: Duration(milliseconds: (kIsWeb ? 210 : 300) + _rng.nextInt(60)),
+        duration: Duration(milliseconds: (kIsWeb ? 300 : 420) + _rng.nextInt(60)),
         delay: _stagger.reserve(_dealGap),
         bend: jitterAngle(_rng, 0.16),
         endRotation: jitterAngle(_rng, 0.10),
@@ -193,7 +193,7 @@ class TableFx {
       style: FlightStyle.deal,
       // Base differs per platform; the nextInt(60) draw stays in place to
       // preserve the RNG draw order (see _flyMyDraws).
-      duration: Duration(milliseconds: (kIsWeb ? 210 : 280) + _rng.nextInt(60)),
+      duration: Duration(milliseconds: (kIsWeb ? 300 : 400) + _rng.nextInt(60)),
       delay: _stagger.reserve(_dealGap),
       bend: jitterAngle(_rng, 0.16),
       endRotation: jitterAngle(_rng, 0.14),

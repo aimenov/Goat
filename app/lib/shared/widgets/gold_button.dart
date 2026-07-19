@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/render_mode.dart';
 import '../theme/tokens.dart';
 
 class GoldButton extends StatefulWidget {
@@ -65,20 +66,25 @@ class _GoldButtonState extends State<GoldButton> {
         curve: Curves.easeOut,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            gradient: enabled
+            // CPU mode: solid gold instead of the metallic gradient, and no
+            // drop shadow (blur is the priciest software-raster op).
+            gradient: enabled && !cpuRenderMode
                 ? const LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [Tokens.gold200, Tokens.gold500],
                   )
                 : null,
-            color: enabled ? null : Tokens.gold600.withValues(alpha: 0.35),
+            color: enabled
+                ? (cpuRenderMode ? Tokens.gold400 : null)
+                : Tokens.gold600.withValues(alpha: 0.35),
             borderRadius: BorderRadius.circular(Tokens.r10),
             border: Border.all(
               color: Tokens.gold600.withValues(alpha: enabled ? 1 : 0.4),
               width: 1,
             ),
-            boxShadow: enabled ? const [Tokens.shadowCard] : null,
+            boxShadow:
+                enabled && !cpuRenderMode ? const [Tokens.shadowCard] : null,
           ),
           child: button,
         ),

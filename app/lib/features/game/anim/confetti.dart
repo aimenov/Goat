@@ -8,6 +8,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import '../../../core/render_mode.dart';
 import '../../../shared/theme/tokens.dart';
 
 class ConfettiParticle {
@@ -195,12 +196,17 @@ class ConfettiBurst extends StatefulWidget {
 
 class _ConfettiBurstState extends State<ConfettiBurst>
     with SingleTickerProviderStateMixin {
+  /// CPU mode repaints every particle per frame in software — cap the count.
+  static const _cpuParticleCount = 24;
+
   late final AnimationController _controller = AnimationController(
     vsync: this,
     duration: widget.duration,
   );
   late final List<ConfettiParticle> _particles = ConfettiParticle.generate(
-    widget.particleCount,
+    cpuRenderMode
+        ? min(widget.particleCount, _cpuParticleCount)
+        : widget.particleCount,
     Random(widget.seed),
     palette: widget.palette,
   );

@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../../core/cards.dart';
+import '../../../core/render_mode.dart';
 import '../../../core/services/sound.dart';
 import '../../../shared/cards/card_face.dart';
 import '../../../shared/fx/radial_glow.dart';
@@ -156,7 +157,10 @@ class FlightLayerState extends State<FlightLayer>
         dock: dock,
       ),
     );
-    // ~t=0.30 of the 1500 ms flip: the face is up — shimmer.
+    // ~t=0.30 of the 1500 ms flip: the face is up — shimmer. Skipped in CPU
+    // mode: 36 tumbling particles over a full-screen layer is pure software
+    // raster cost, and the flip + glow already carry the moment.
+    if (cpuRenderMode) return;
     _after(const Duration(milliseconds: 450), () {
       _push(
         _ShimmerFx(

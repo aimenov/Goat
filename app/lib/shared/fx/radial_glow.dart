@@ -4,6 +4,8 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/render_mode.dart';
+
 class RadialGlowPainter extends CustomPainter {
   const RadialGlowPainter({required this.color, required this.opacity});
 
@@ -25,6 +27,9 @@ class RadialGlowPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
+    // CPU mode: a big animated radial gradient is the single most expensive
+    // software fill — the glow is an accent, not information, so drop it.
+    if (cpuRenderMode) return;
     if (opacity <= 0.01) return;
     final center = size.center(Offset.zero);
     final radius = size.shortestSide / 2;

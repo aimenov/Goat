@@ -22,3 +22,6 @@ app/*.iml
 *.log
 Thumbs.db
 .DS_Store
+
+# Downloaded upstream assets (tools/subset_emoji.py cache)
+tools/.cache/

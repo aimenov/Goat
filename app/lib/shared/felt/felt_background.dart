@@ -5,6 +5,7 @@ library;
 
 import 'package:flutter/material.dart';
 
+import '../../core/render_mode.dart';
 import '../theme/tokens.dart';
 
 class FeltPainter extends CustomPainter {
@@ -15,6 +16,14 @@ class FeltPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
+
+    // CPU mode: two full-screen radial gradients are far too expensive to
+    // software-rasterize (even cached, every resize re-pays them) — a flat
+    // felt tone keeps the palette without the shader fills.
+    if (cpuRenderMode) {
+      canvas.drawRect(rect, Paint()..color = Tokens.felt700);
+      return;
+    }
 
     // 1. Base fill.
     canvas.drawRect(rect, Paint()..color = Tokens.felt800);

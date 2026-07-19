@@ -1,6 +1,7 @@
 /// The casino-elegance dark theme, built entirely from [Tokens].
 library;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import 'tokens.dart';
@@ -24,6 +25,11 @@ ThemeData buildCasinoTheme() {
     useMaterial3: true,
     colorScheme: scheme,
     fontFamily: Tokens.sansFamily,
+    // Web has no system emoji font: without a bundled fallback CanvasKit
+    // downloads Noto from gstatic at runtime (and fails offline). Explicit
+    // Tokens styles leave fontFamilyFallback null, so this ambient fallback
+    // survives TextStyle.merge everywhere. Mobile keeps native color emoji.
+    fontFamilyFallback: kIsWeb ? const ['NotoEmoji'] : null,
     scaffoldBackgroundColor: Tokens.felt800,
     filledButtonTheme: FilledButtonThemeData(
       style: ButtonStyle(

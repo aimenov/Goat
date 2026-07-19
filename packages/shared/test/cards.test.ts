@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DECK_SIZE,
-  RANKS,
+  RANK_NAMES,
   SHOHA,
   TOTAL_POINTS,
   cardName,
@@ -23,7 +23,7 @@ test('deck has 36 unique cards totalling 120 points', () => {
 });
 
 test('rank order: 10 outranks K, Q, J; A is highest; 6 is lowest', () => {
-  const order = RANKS.join(',');
+  const order = RANK_NAMES.join(',');
   assert.equal(order, '6,7,8,9,J,Q,K,10,A');
   const ten = cardOf(0, 7);
   const king = cardOf(0, 6);

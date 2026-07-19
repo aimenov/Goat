@@ -7,8 +7,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
+import '../../core/cosmetics.dart';
 import '../../core/net/api.dart';
+import '../../core/profile.dart';
 import '../../core/render_mode.dart';
+import '../../core/services/ads/ads_service.dart';
 import '../../core/services/sound.dart';
 import '../../core/session.dart';
 import '../../shared/cards/suit_paths.dart';
@@ -16,11 +19,18 @@ import '../../shared/felt/felt_background.dart';
 import '../../shared/theme/tokens.dart';
 import '../../shared/widgets/gold_button.dart';
 import '../../shared/widgets/hover_lift.dart';
+import '../economy/daily_bonus_sheet.dart';
+import '../economy/quests_sheet.dart';
 import '../game/anim/motion_widgets.dart';
+import 'profile_header.dart';
 
 /// Whether the CPU-render-mode hint was already shown this app session —
 /// module-level so revisiting the lobby doesn't repeat it.
 bool _cpuHintShown = false;
+
+/// Whether the daily-bonus sheet already auto-opened this app session —
+/// module-level so returning from a game doesn't nag again.
+bool _dailySheetAutoOpened = false;
 
 class LobbyScreen extends ConsumerStatefulWidget {
   const LobbyScreen({super.key});
@@ -45,11 +55,28 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   final Set<String> _seenRooms = {};
   Set<String> _newRooms = const {};
 
+  ProviderSubscription<AsyncValue<PlayerProfile>>? _profileSub;
+
   @override
   void initState() {
     super.initState();
     _refresh();
     _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) => _refresh(silent: true));
+    // Economy profile: refreshed by _refresh() above; auto-open the daily
+    // sheet once per session as soon as a load reports a claimable bonus.
+    _profileSub = ref.listenManual(
+      profileProvider,
+      (_, next) => _maybeAutoOpenDaily(next.value),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _maybeAutoOpenDaily(ref.read(profileProvider).value);
+    });
+    // Ads init from the lobby only (idempotent inside the service): the UMP
+    // consent form, when required, may appear here — never over login or the
+    // game table. Fire-and-forget; the service swallows its own failures.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) ref.read(adsServiceProvider).init();
+    });
     if (cpuRenderMode && !_cpuHintShown) {
       _cpuHintShown = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -71,11 +98,25 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _profileSub?.close();
     _createNameController.dispose();
     super.dispose();
   }
 
+  /// Session-once: pops the daily sheet the first time a profile load says
+  /// today's bonus is claimable.
+  void _maybeAutoOpenDaily(PlayerProfile? profile) {
+    if (_dailySheetAutoOpened || profile == null || !profile.dailyClaimable) {
+      return;
+    }
+    _dailySheetAutoOpened = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) showDailyBonusSheet(context);
+    });
+  }
+
   Future<void> _refresh({bool silent = false}) async {
+    if (!silent) unawaited(ref.read(profileProvider.notifier).refresh());
     try {
       final rooms = await ref.read(apiProvider).listRooms();
       if (!mounted) return;
@@ -290,6 +331,23 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
           physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.only(top: 8, bottom: 160),
           children: [
+            // Economy header: its own Consumer so profile updates rebuild
+            // the plaque alone; hidden while signed out.
+            Consumer(
+              builder: (context, ref, _) {
+                final identity = ref.watch(identityProvider).value;
+                if (identity == null) return const SizedBox.shrink();
+                final profile =
+                    ref.watch(profileProvider).value ?? const PlayerProfile();
+                return ProfileHeader(
+                  nickname: identity.nickname,
+                  profile: profile,
+                  onCoins: () => context.push('/shop'),
+                  onRating: () => context.push('/leaderboard'),
+                  onQuests: () => showQuestsSheet(context),
+                );
+              },
+            ),
             if (_error != null)
               Padding(
                 padding: const EdgeInsets.all(16),
@@ -316,6 +374,7 @@ class _LobbyScreenState extends ConsumerState<LobbyScreen> {
     }
 
     return FeltBackground(
+      theme: ref.watch(cosmeticsProvider).felt,
       child: Scaffold(
         backgroundColor: Colors.transparent,
         appBar: AppBar(

@@ -325,6 +325,7 @@ class GameController extends Notifier<GameUiState> {
           trick: null,
           legal: null,
           lastDealResults: null,
+          rewards: null,
         );
 
       case 'yourDraw':
@@ -438,6 +439,12 @@ class GameController extends Notifier<GameUiState> {
           trick: null,
           legal: null,
         );
+
+      case 'gameRewards':
+        // Paced like game progression (NOT a bypass type): it queues with a
+        // zero gap right behind the held gameEnded, so the rewards block
+        // appears together with the game-over screen — never before it.
+        state = state.copyWith(rewards: GameRewards.fromWire(m));
 
       case 'playerConnection':
         final seat = (m['seat'] as num).toInt();

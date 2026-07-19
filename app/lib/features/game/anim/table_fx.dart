@@ -16,6 +16,7 @@ import '../../../core/game/game_controller.dart';
 import '../../../core/game/models.dart';
 import '../../../core/services/sound.dart';
 import '../../../shared/cards/card_face.dart';
+import '../../../shared/theme/cosmetic_styles.dart';
 import 'flight_layer.dart';
 import 'flight_math.dart';
 import 'table_anchors.dart';
@@ -32,6 +33,12 @@ class TableFx {
 
   /// Called when a new deal starts (felt light-sweep re-key).
   VoidCallback? onDealStarted;
+
+  /// Equipped card-back skin for the face-down flights (draws, discards,
+  /// vacuum). Set from the TableScreen build; cosmetics cannot change
+  /// mid-game (the shop is unreachable from the table), so it never goes
+  /// stale between builds.
+  CardBackStyle cardBackStyle = CardBackStyle.classic;
 
   Random _rng = Random(1);
   final StaggerScheduler _stagger = StaggerScheduler();
@@ -187,7 +194,7 @@ class TableFx {
     layer.flyCard(
       from: _stockPos(layer),
       to: _seatPos(layer, seat, s),
-      card: const CardBack(height: _cardH),
+      card: CardBack(height: _cardH, style: cardBackStyle),
       width: _cardH * cardAspect,
       height: _cardH,
       style: FlightStyle.deal,
@@ -292,7 +299,7 @@ class TableFx {
       layer.flyCard(
         from: from,
         to: to + Offset(jitterAngle(_rng, 10), jitterAngle(_rng, 5)),
-        card: const CardBack(height: _cardH),
+        card: CardBack(height: _cardH, style: cardBackStyle),
         width: _cardH * cardAspect,
         height: _cardH,
         style: FlightStyle.discard,
@@ -326,7 +333,7 @@ class TableFx {
       layer.flyCard(
         from: center + Offset(jitterAngle(_rng, 70), jitterAngle(_rng, 34)),
         to: to,
-        card: const CardBack(height: 46),
+        card: CardBack(height: 46, style: cardBackStyle),
         width: 46 * cardAspect,
         height: 46,
         style: FlightStyle.vacuum,

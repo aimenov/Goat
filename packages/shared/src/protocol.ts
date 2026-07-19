@@ -2,8 +2,9 @@ import type { CardId, Seat, Suit } from './cards.js';
 import type { EmojiId, ErrorCode, AchievementId } from './enums.js';
 import type { BeatPair } from './actions.js';
 import type { PlayerView, DealResult } from './view.js';
+import type { CoinBreakdown, QuestProgressView, RankId, RewardLine } from './economy.js';
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /* ------------------------------------------------------------------ *
  * Client → Server                                                     *
@@ -57,7 +58,25 @@ export type ServerEvent =
   | { type: 'playerConnection'; seq: number; seat: Seat; connected: boolean }
   | { type: 'lobby'; seq: number; seats: LobbySeat[]; canStart: boolean; you: Seat }
   | { type: 'rematch'; seq: number; votes: Seat[] }
-  | { type: 'achievementUnlocked'; seq: number; id: AchievementId };
+  | { type: 'achievementUnlocked'; seq: number; id: AchievementId }
+  /**
+   * Per-seat economy results, sent right after `gameEnded` in the same batch.
+   * The client's paced queue must let it wait behind the gameEnded hold
+   * (deliberately NOT a bypass type). `anonymous: true` marks zeroed rewards
+   * for seats without a persistent identity.
+   */
+  | {
+      type: 'gameRewards';
+      seq: number;
+      anonymous?: boolean;
+      coins: CoinBreakdown;
+      breakdown: RewardLine[];
+      ratingDelta: number;
+      rating: number;
+      rank: { id: RankId; ru: string; emoji: string };
+      questProgress: QuestProgressView[];
+      canDouble: boolean;
+    };
 
 /** Full personal view — sent on join, reconnect, resync, and after every own ack. */
 export interface SnapshotMessage {

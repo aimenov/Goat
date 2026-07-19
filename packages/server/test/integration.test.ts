@@ -90,34 +90,19 @@ function play(p: Player, actionId: string): void {
   }
 }
 
-test('full 4-player game over WebSocket: privacy, acks, legality, completion', async () => {
-  const client = new MiniClient(HTTP);
-  const first = await client.joinOrCreate('goat', { nickname: 'Один', playerCount: 4, scoreLimit: 24, turnSeconds: 15 });
-  const rooms: MiniRoom[] = [first];
-  for (let i = 1; i < 4; i++) {
-    rooms.push(await client.joinById(first.roomId, { nickname: `Игрок${i}` }));
-  }
-  const players = rooms.map(wirePlayer);
-
-  // everyone readies up → game starts
+/**
+ * Ready up, wait for the deal, then drive random-but-legal moves until
+ * `gameEnded` (cap 3000 moves; the server enforces legality throughout).
+ */
+async function playUntilGameEnd(players: Player[]): Promise<void> {
   for (const p of players) p.room.send('intent', { type: 'ready', ready: true });
   await until(() => players.some((p) => p.view !== null), 8000, 'first snapshot');
 
   // give all players a snapshot for seat mapping
   for (const p of players) p.room.send('intent', { type: 'resync' });
   await until(() => players.every((p) => p.view !== null), 8000, 'all snapshots');
-
-  // deal started: everyone got exactly 6 cards privately
   await until(() => players.every((p) => p.yourDraws.length > 0), 8000, 'hands dealt');
-  for (const p of players) {
-    assert.equal(p.yourDraws[0]!.length, 6, 'private hand of 6');
-    assert.equal(p.view!.myHand.length, 6);
-    // privacy: views expose only counts for other seats
-    assert.ok(p.view!.seats.every((s) => s.handCount === 6));
-    assert.equal((p.view as unknown as Record<string, unknown>)['stock'], undefined);
-  }
 
-  // play until the game ends (cap at 3000 moves; server enforces legality)
   let moves = 0;
   let gameEnded = false;
   while (!gameEnded && moves < 3000) {
@@ -153,6 +138,34 @@ test('full 4-player game over WebSocket: privacy, acks, legality, completion', a
     moves++;
   }
   assert.ok(gameEnded, `game did not end after ${moves} moves`);
+}
+
+test('full 4-player game over WebSocket: privacy, acks, legality, completion', async () => {
+  const client = new MiniClient(HTTP);
+  const first = await client.joinOrCreate('goat', { nickname: 'Один', playerCount: 4, scoreLimit: 24, turnSeconds: 15 });
+  const rooms: MiniRoom[] = [first];
+  for (let i = 1; i < 4; i++) {
+    rooms.push(await client.joinById(first.roomId, { nickname: `Игрок${i}` }));
+  }
+  const players = rooms.map(wirePlayer);
+
+  // deal check happens mid-run, so kick off readiness first
+  for (const p of players) p.room.send('intent', { type: 'ready', ready: true });
+  await until(() => players.some((p) => p.view !== null), 8000, 'first snapshot');
+  for (const p of players) p.room.send('intent', { type: 'resync' });
+  await until(() => players.every((p) => p.view !== null), 8000, 'all snapshots');
+
+  // deal started: everyone got exactly 6 cards privately
+  await until(() => players.every((p) => p.yourDraws.length > 0), 8000, 'hands dealt');
+  for (const p of players) {
+    assert.equal(p.yourDraws[0]!.length, 6, 'private hand of 6');
+    assert.equal(p.view!.myHand.length, 6);
+    // privacy: views expose only counts for other seats
+    assert.ok(p.view!.seats.every((s) => s.handCount === 6));
+    assert.equal((p.view as unknown as Record<string, unknown>)['stock'], undefined);
+  }
+
+  await playUntilGameEnd(players);
 
   const end = players[0]!.events.find((e) => e.type === 'gameEnded');
   assert.ok(end && end.type === 'gameEnded');
@@ -212,6 +225,132 @@ test('lobby: created rooms are listed with their options', async () => {
   assert.equal(mine.metadata?.['playerCount'], 6);
   assert.equal(mine.metadata?.['scoreLimit'], 36);
   await room.leave();
+});
+
+async function guestToken(deviceId: string, nickname: string): Promise<{ token: string; playerId: string }> {
+  const res = await fetch(`${HTTP}/auth/guest`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId, nickname }),
+  });
+  assert.equal(res.status, 200);
+  return (await res.json()) as { token: string; playerId: string };
+}
+
+function authedPost(token: string | null, path: string, body?: unknown): Promise<Response> {
+  return fetch(`${HTTP}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  });
+}
+
+test('economy: token game pays rewards; leaderboard, daily, ad-double, shop', async () => {
+  const a = await guestToken('econ-device-aaaa', 'Эконом-А');
+  const b = await guestToken('econ-device-bbbb', 'Эконом-Б');
+  const client = new MiniClient(HTTP);
+  const first = await client.joinOrCreate('goat', { token: a.token, playerCount: 2, scoreLimit: 24, turnSeconds: 15 });
+  const second = await client.joinById(first.roomId, { token: b.token });
+  const players = [wirePlayer(first), wirePlayer(second)]; // players[0] ↔ a, players[1] ↔ b
+
+  await playUntilGameEnd(players);
+  await until(() => players.every((p) => p.events.some((e) => e.type === 'gameRewards')), 8000, 'gameRewards for all');
+
+  const end = players[0]!.events.find((e) => e.type === 'gameEnded');
+  assert.ok(end && end.type === 'gameEnded');
+  const goatSeat = end.goats[0]!;
+  const rewardOf = (p: Player) => {
+    const e = p.events.find((ev) => ev.type === 'gameRewards');
+    assert.ok(e && e.type === 'gameRewards');
+    return e;
+  };
+  const winnerP = players.find((p) => p.seat !== goatSeat)!;
+  const goatP = players.find((p) => p.seat === goatSeat)!;
+  const winner = rewardOf(winnerP);
+  const goat = rewardOf(goatP);
+
+  // winner earns above consolation and gains rating; goat gets 5 (+ possible
+  // quest bonus) and loses rating; both carry a rank badge
+  assert.equal(winner.anonymous, undefined);
+  assert.ok(winner.coins.total > 5, `winner total ${winner.coins.total}`);
+  assert.ok(winner.ratingDelta > 0);
+  assert.equal(goat.coins.base, 5);
+  assert.equal(goat.coins.total, 5 + goat.coins.questBonus);
+  assert.ok(goat.ratingDelta < 0);
+  for (const r of [winner, goat]) {
+    assert.ok(r.rank.ru.length > 0);
+    assert.equal(typeof r.canDouble, 'boolean');
+  }
+
+  const winnerAuth = winnerP === players[0] ? a : b;
+
+  // profile reflects the moved rating and earned капуста
+  const profRes = await fetch(`${HTTP}/profile/${winnerAuth.playerId}`);
+  assert.equal(profRes.status, 200);
+  const prof = (await profRes.json()) as Record<string, unknown>;
+  assert.equal(prof['rating'], winner.rating);
+  assert.ok((prof['rating'] as number) > 1000);
+  assert.equal(prof['coins'], winner.coins.total);
+  assert.equal(prof['dailyClaimable'], true);
+  assert.equal((prof['quests'] as unknown[]).length, 3);
+
+  // weekly leaderboard contains the winner
+  const lbRes = await fetch(`${HTTP}/leaderboard?scope=weekly`);
+  assert.equal(lbRes.status, 200);
+  const lb = (await lbRes.json()) as { entries: { playerId: string }[] };
+  assert.ok(lb.entries.some((e) => e.playerId === winnerAuth.playerId), 'winner on weekly board');
+
+  // rewarded ad doubles the game total exactly once
+  const double1 = await authedPost(winnerAuth.token, '/ads/reward', { kind: 'doubleGame' });
+  assert.equal(double1.status, 200);
+  const doubled = (await double1.json()) as { granted: number; coins: number };
+  assert.equal(doubled.granted, winner.coins.total);
+  assert.equal(doubled.coins, winner.coins.total * 2);
+  const double2 = await authedPost(winnerAuth.token, '/ads/reward', { kind: 'doubleGame' });
+  assert.equal(double2.status, 409);
+
+  // daily bonus: first claim pays 10, the same day 409s, no token 401s
+  const claim1 = await authedPost(winnerAuth.token, '/daily/claim');
+  assert.equal(claim1.status, 200);
+  const claimed = (await claim1.json()) as { amount: number; streak: number; coins: number };
+  assert.equal(claimed.amount, 10);
+  assert.equal(claimed.streak, 1);
+  assert.equal((await authedPost(winnerAuth.token, '/daily/claim')).status, 409);
+  assert.equal((await authedPost(null, '/daily/claim')).status, 401);
+
+  // shop: outcome depends on the earned balance (cheapest item = 150 🥬)
+  const balance = claimed.coins;
+  const buy = await authedPost(winnerAuth.token, '/shop/purchase', { itemId: 'back_cabbage' });
+  if (balance >= 150) {
+    assert.equal(buy.status, 200);
+    const bought = (await buy.json()) as { coins: number; owned: string[] };
+    assert.equal(bought.coins, balance - 150);
+    assert.ok(bought.owned.includes('back_cabbage'));
+    const equip = await authedPost(winnerAuth.token, '/shop/equip', { itemId: 'back_cabbage' });
+    assert.equal(equip.status, 200);
+    assert.equal(((await equip.json()) as { equipped: { cardBack: string } }).equipped.cardBack, 'back_cabbage');
+  } else {
+    assert.equal(buy.status, 402);
+    // defaults are always equippable even with an empty wardrobe
+    const equip = await authedPost(winnerAuth.token, '/shop/equip', { itemId: 'felt_classic' });
+    assert.equal(equip.status, 200);
+    assert.equal(((await equip.json()) as { equipped: { felt: string } }).equipped.felt, 'felt_classic');
+  }
+
+  // premium items can never be bought with капуста
+  assert.equal((await authedPost(winnerAuth.token, '/shop/purchase', { itemId: 'back_golden_goat' })).status, 403);
+
+  // profile reflects the equip
+  const prof2 = (await (await fetch(`${HTTP}/profile/${winnerAuth.playerId}`)).json()) as {
+    equipped: { cardBack: string; felt: string };
+  };
+  assert.ok(prof2.equipped.cardBack === 'back_cabbage' || prof2.equipped.felt === 'felt_classic');
+
+  await first.leave();
+  await second.leave();
 });
 
 test('guest auth endpoint issues a token the room accepts', async () => {

@@ -5,6 +5,7 @@ library;
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/cosmetics.dart';
 import '../../core/net/api.dart';
 import '../../core/session.dart';
 import '../../shared/felt/felt_background.dart';
@@ -75,6 +76,7 @@ class _AchievementsScreenState extends ConsumerState<AchievementsScreen> {
       );
     }
     return FeltBackground(
+      theme: ref.watch(cosmeticsProvider).felt,
       child: Scaffold(
         backgroundColor: Colors.transparent,
         appBar: AppBar(title: const Text('Достижения')),

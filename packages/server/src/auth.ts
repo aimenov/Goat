@@ -25,6 +25,21 @@ export function verifyToken(token: string): GuestClaims {
   return { playerId: payload.playerId, nickname: payload.nickname };
 }
 
+/**
+ * Claims from an `Authorization: Bearer <jwt>` header, or null when the header
+ * is absent/malformed/invalid. Endpoints take playerId ONLY from here — never
+ * from a request body.
+ */
+export function bearerClaims(getHeader: (key: string) => string | null): GuestClaims | null {
+  const match = /^Bearer\s+(.+)$/i.exec(getHeader('authorization') ?? '');
+  if (!match) return null;
+  try {
+    return verifyToken(match[1]!);
+  } catch {
+    return null;
+  }
+}
+
 export function sanitizeNickname(raw: unknown): string {
   const nick = String(raw ?? '')
     .trim()

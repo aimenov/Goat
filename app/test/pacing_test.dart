@@ -95,6 +95,18 @@ Map<String, Object?> dealStarted(int seq, {int dealIndex = 1}) =>
 Map<String, Object?> gameEnded(int seq) =>
     {'type': 'gameEnded', 'seq': seq, 'goats': [2], 'scores': [0, 3, 12, 5]};
 
+Map<String, Object?> gameRewards(int seq) => {
+      'type': 'gameRewards',
+      'seq': seq,
+      'coins': {'total': 45},
+      'breakdown': [
+        {'ru': 'Победа', 'amount': 20},
+      ],
+      'ratingDelta': 18,
+      'rating': 1018,
+      'canDouble': true,
+    };
+
 /// Attaches a controller to a [FakeRoom] and applies the initial snapshot
 /// (which the attach-time resync makes instant). Returns the wired trio plus
 /// a live log of applied table-event types.
@@ -254,6 +266,38 @@ void main() {
       async.elapse(const Duration(milliseconds: 1));
       expect(read().roomPhase, RoomPhase.gameOver);
       expect(read().goats, [2]);
+      s.container.dispose();
+    });
+  });
+
+  test('gameRewards queues behind the held gameEnded and applies with zero gap', () {
+    fakeAsync((async) {
+      final s = setup(async);
+      GameUiState read() => s.container.read(gameControllerProvider);
+
+      // Server sends both in one batch; the rewards must never show while
+      // the table still displays the final deal.
+      s.room.inject('event', gameEnded(1));
+      s.room.inject('event', gameRewards(2));
+      async.flushMicrotasks();
+      expect(read().roomPhase, RoomPhase.playing);
+      expect(read().rewards, isNull);
+
+      async.elapse(const Duration(milliseconds: gameOverMs - 1));
+      expect(read().rewards, isNull);
+      async.elapse(const Duration(milliseconds: 1));
+      expect(read().roomPhase, RoomPhase.gameOver);
+      expect(read().rewards, isNotNull,
+          reason: 'zero gap: rewards land in the same drain as gameEnded');
+      expect(read().rewards!.coins, 45);
+      expect(read().rewards!.ratingDelta, 18);
+      expect(s.applied, ['gameEnded', 'gameRewards']);
+
+      // Rematch: the next dealStarted clears the previous game's rewards.
+      s.room.inject('event', dealStarted(3));
+      async.flushMicrotasks();
+      expect(read().rewards, isNull);
+      expect(read().roomPhase, RoomPhase.playing);
       s.container.dispose();
     });
   });

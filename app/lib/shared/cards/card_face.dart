@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 
 import '../../core/cards.dart';
 import '../../core/render_mode.dart';
+import '../theme/cosmetic_styles.dart';
 import '../theme/tokens.dart';
 import 'suit_paths.dart';
 
@@ -382,8 +383,9 @@ class CardFacePainter extends CustomPainter {
 
 class CardBack extends StatelessWidget {
   final double height;
+  final CardBackStyle style;
 
-  const CardBack({super.key, this.height = 92});
+  const CardBack({super.key, this.height = 92, this.style = CardBackStyle.classic});
 
   @override
   Widget build(BuildContext context) {
@@ -399,7 +401,7 @@ class CardBack extends StatelessWidget {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(radius),
-        child: CustomPaint(size: Size(width, height), painter: const _LatticePainter()),
+        child: CustomPaint(size: Size(width, height), painter: LatticePainter(style: style)),
       ),
     );
   }
@@ -409,42 +411,54 @@ class CardBack extends StatelessWidget {
 class FaceDownCard extends StatelessWidget {
   final double height;
   final int seed;
+  final CardBackStyle style;
 
-  const FaceDownCard({super.key, this.height = 92, this.seed = 0});
+  const FaceDownCard({
+    super.key,
+    this.height = 92,
+    this.seed = 0,
+    this.style = CardBackStyle.classic,
+  });
 
   @override
   Widget build(BuildContext context) {
     final angle = (Random(seed * 31 + 7).nextDouble() - 0.5) * 0.18;
-    return Transform.rotate(angle: angle, child: CardBack(height: height));
+    return Transform.rotate(
+      angle: angle,
+      child: CardBack(height: height, style: style),
+    );
   }
 }
 
-/// Card back: deep-green gradient, gold diagonal lattice, an eight-petal gold
-/// rosette and a double gold hairline frame. Static — never repaints.
-class _LatticePainter extends CustomPainter {
-  const _LatticePainter();
+/// Card back: [CardBackStyle] gradient, diagonal accent lattice, an
+/// eight-petal rosette and a double hairline frame. Repaints only when the
+/// style instance changes (const-canonical styles make that `!identical`).
+class LatticePainter extends CustomPainter {
+  const LatticePainter({this.style = CardBackStyle.classic});
+
+  final CardBackStyle style;
 
   @override
   void paint(Canvas canvas, Size size) {
     final w = size.width;
     final h = size.height;
 
-    // 1. Base: vertical deep-green gradient (flat fill in CPU mode).
+    // 1. Base: vertical gradient (flat fill in CPU mode).
     canvas.drawRect(
       Offset.zero & size,
       cpuRenderMode
-          ? (Paint()..color = Tokens.felt600)
+          ? (Paint()..color = style.flat)
           : (Paint()
-              ..shader = const LinearGradient(
+              ..shader = LinearGradient(
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
-                colors: [Tokens.felt500, Tokens.felt800],
+                colors: [style.top, style.bottom],
               ).createShader(Offset.zero & size)),
     );
 
-    // 2. Gold diagonal lattice.
+    // 2. Diagonal accent lattice.
     final line = Paint()
-      ..color = Tokens.gold600.withValues(alpha: 0.32)
+      ..color = style.accentDeep.withValues(alpha: 0.32)
       ..strokeWidth = max(0.6, h * 0.012);
     final step = w / 4;
     for (var x = -h; x < w + h; x += step) {
@@ -452,7 +466,7 @@ class _LatticePainter extends CustomPainter {
       canvas.drawLine(Offset(x + h, 0), Offset(x, h), line);
     }
 
-    // 3. Rosette: gold ring, 8 stroked petals, tiny filled center.
+    // 3. Rosette: accent ring, 8 stroked petals, tiny filled center.
     final center = size.center(Offset.zero);
     final r = w * 0.30;
     canvas.drawCircle(
@@ -461,7 +475,7 @@ class _LatticePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.2
-        ..color = Tokens.gold400.withValues(alpha: 0.5),
+        ..color = style.accent.withValues(alpha: 0.5),
     );
     final petal = Path()
       ..moveTo(0, 0)
@@ -470,7 +484,7 @@ class _LatticePainter extends CustomPainter {
     final petalPaint = Paint()
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1
-      ..color = Tokens.gold300.withValues(alpha: 0.45);
+      ..color = style.accentSoft.withValues(alpha: 0.45);
     canvas.save();
     canvas.translate(center.dx, center.dy);
     for (var i = 0; i < 8; i++) {
@@ -478,9 +492,9 @@ class _LatticePainter extends CustomPainter {
       canvas.rotate(pi / 4);
     }
     canvas.restore();
-    canvas.drawCircle(center, r * 0.12, Paint()..color = Tokens.gold400);
+    canvas.drawCircle(center, r * 0.12, Paint()..color = style.accent);
 
-    // 4. Double gold hairline frame.
+    // 4. Double hairline frame.
     canvas.drawRRect(
       RRect.fromRectAndRadius(
         Rect.fromLTWH(2.5, 2.5, w - 5, h - 5),
@@ -489,7 +503,7 @@ class _LatticePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1
-        ..color = Tokens.gold400.withValues(alpha: 0.6),
+        ..color = style.accent.withValues(alpha: 0.6),
     );
     canvas.drawRRect(
       RRect.fromRectAndRadius(
@@ -499,10 +513,11 @@ class _LatticePainter extends CustomPainter {
       Paint()
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1
-        ..color = Tokens.gold600.withValues(alpha: 0.4),
+        ..color = style.accentDeep.withValues(alpha: 0.4),
     );
   }
 
   @override
-  bool shouldRepaint(covariant _LatticePainter oldDelegate) => false;
+  bool shouldRepaint(covariant LatticePainter oldDelegate) =>
+      !identical(style, oldDelegate.style);
 }

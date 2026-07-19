@@ -9,4 +9,10 @@ export const config = {
   /** Autopilot acts this fast when the seat is disconnected or timed out. */
   autopilotDelayMs: 1200,
   reconnectionSeconds: Number(process.env['RECONNECTION_SECONDS'] ?? 120),
+  /** Daily cap on rewarded-ad doublings per player (UTC day). */
+  maxRewardedAdsPerDay: 5,
+  /** How long a game/daily reward stays doubleable via a rewarded ad. */
+  pendingDoubleTtlMs: 900_000,
+  /** Games required before a player appears on the all-time leaderboard. */
+  leaderboardMinGames: 5,
 };

@@ -17,6 +17,7 @@ import '../../../core/render_mode.dart';
 import '../../../core/services/sound.dart';
 import '../../../shared/cards/card_face.dart';
 import '../../../shared/fx/radial_glow.dart';
+import '../../../shared/theme/cosmetic_styles.dart';
 import '../../../shared/theme/tokens.dart';
 import 'confetti.dart';
 import 'flight_math.dart';
@@ -42,10 +43,14 @@ enum FlightStyle {
 }
 
 class FlightLayer extends StatefulWidget {
-  const FlightLayer({super.key, this.sound});
+  const FlightLayer({super.key, this.sound, this.style = CardBackStyle.classic});
 
   /// Optional SFX hookup — only the шоха slam needs frame-exact audio.
   final SoundService? sound;
+
+  /// Equipped card-back skin for backs this layer builds itself (the
+  /// trump-reveal flip); flights receive already-built card widgets.
+  final CardBackStyle style;
 
   @override
   State<FlightLayer> createState() => FlightLayerState();
@@ -155,6 +160,7 @@ class FlightLayerState extends State<FlightLayer>
         ),
         card: card,
         dock: dock,
+        backStyle: widget.style,
       ),
     );
     // ~t=0.30 of the 1500 ms flip: the face is up — shimmer. Skipped in CPU
@@ -425,10 +431,12 @@ class _TrumpFx extends _Fx {
     required AnimationController controller,
     required this.card,
     required this.dock,
+    this.backStyle = CardBackStyle.classic,
   }) : super(controller);
 
   final int card;
   final Offset dock;
+  final CardBackStyle backStyle;
 
   static const _cardH = 100.0;
 
@@ -539,7 +547,7 @@ class _TrumpFx extends _Fx {
                   transform: transform,
                   child: RepaintBoundary(
                     child: showBack
-                        ? const CardBack(height: _cardH)
+                        ? CardBack(height: _cardH, style: backStyle)
                         : CardFace(card: card, height: _cardH, trumpStyle: true),
                   ),
                 ),

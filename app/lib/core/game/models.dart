@@ -143,6 +143,93 @@ class DealResult {
   const DealResult({required this.seat, required this.cardPoints, required this.penalty, required this.score});
 }
 
+/// One line of the game-end coin breakdown — server RU text shown verbatim.
+class RewardLine {
+  final String ru;
+  final int amount;
+  const RewardLine({required this.ru, required this.amount});
+}
+
+/// A daily quest's progress as advanced by this game.
+class QuestTick {
+  final String id;
+  final String ru;
+  final int progress;
+  final int target;
+  final bool completed;
+
+  const QuestTick({
+    required this.id,
+    this.ru = '',
+    this.progress = 0,
+    this.target = 1,
+    this.completed = false,
+  });
+}
+
+/// The `gameRewards` event: what this game earned (капуста, rating, quest
+/// ticks). Fully tolerant of missing fields — an older server simply never
+/// sends it, and a partial payload must not crash the game-over screen.
+class GameRewards {
+  /// Total coins earned (`coins.total` on the wire).
+  final int coins;
+  final List<RewardLine> breakdown;
+  final int ratingDelta;
+  final int rating;
+  final String? rankId;
+  final List<QuestTick> questProgress;
+  final bool canDouble;
+
+  /// Anonymous seat: nothing earned, the UI shows a login hint instead.
+  final bool anonymous;
+
+  const GameRewards({
+    this.coins = 0,
+    this.breakdown = const [],
+    this.ratingDelta = 0,
+    this.rating = 1000,
+    this.rankId,
+    this.questProgress = const [],
+    this.canDouble = false,
+    this.anonymous = false,
+  });
+
+  factory GameRewards.fromWire(Map<String, Object?> m) {
+    // Tolerant reads throughout: a partial payload must degrade, not crash.
+    int asInt(Object? v, [int fallback = 0]) => v is num ? v.toInt() : fallback;
+    final coins = m['coins'];
+    final rank = m['rank'];
+    final breakdown = m['breakdown'];
+    final quests = m['questProgress'];
+    return GameRewards(
+      coins: coins is Map ? asInt(coins['total']) : asInt(coins),
+      breakdown: [
+        if (breakdown is List)
+          for (final b in breakdown)
+            if (b is Map)
+              RewardLine(ru: '${b['ru'] ?? ''}', amount: asInt(b['amount'])),
+      ],
+      ratingDelta: asInt(m['ratingDelta']),
+      rating: asInt(m['rating'], 1000),
+      rankId: rank is Map && rank['id'] != null ? '${rank['id']}' : null,
+      questProgress: [
+        if (quests is List)
+          for (final q in quests)
+            if (q is Map)
+              QuestTick(
+                id: '${q['id'] ?? ''}',
+                ru: '${q['ru'] ?? ''}',
+                progress: asInt(q['progress']),
+                target: asInt(q['target'], 1),
+                completed: q['completed'] == true,
+              ),
+      ],
+      canDouble: m['canDouble'] == true,
+      anonymous: m['anonymous'] == true,
+    );
+  }
+}
+
 enum RoomPhase { connecting, lobby, playing, reconnecting, gameOver }
 
 class GameUiState {
@@ -168,6 +255,10 @@ class GameUiState {
   final List<int>? goats;
   final List<int>? finalScores;
 
+  /// Game-end rewards (капуста/rating); null until `gameRewards` arrives,
+  /// cleared by the next `dealStarted` (rematch).
+  final GameRewards? rewards;
+
   const GameUiState({
     this.roomPhase = RoomPhase.connecting,
     this.phase = '',
@@ -190,6 +281,7 @@ class GameUiState {
     this.lastDealResults,
     this.goats,
     this.finalScores,
+    this.rewards,
   });
 
   bool get isMyTurn => trick != null && trick!.turn == mySeat && legal != null;
@@ -216,6 +308,7 @@ class GameUiState {
     Object? lastDealResults = _sentinel,
     Object? goats = _sentinel,
     Object? finalScores = _sentinel,
+    Object? rewards = _sentinel,
   }) =>
       GameUiState(
         roomPhase: roomPhase ?? this.roomPhase,
@@ -239,6 +332,7 @@ class GameUiState {
         lastDealResults: lastDealResults == _sentinel ? this.lastDealResults : lastDealResults as List<DealResult>?,
         goats: goats == _sentinel ? this.goats : goats as List<int>?,
         finalScores: finalScores == _sentinel ? this.finalScores : finalScores as List<int>?,
+        rewards: rewards == _sentinel ? this.rewards : rewards as GameRewards?,
       );
 }
 

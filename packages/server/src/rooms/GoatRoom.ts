@@ -24,9 +24,20 @@ import {
 } from '@goat/engine';
 import { randomInt } from 'node:crypto';
 import { SHOHA, rankOf, suitOf } from '@goat/shared';
+import type { CoinBreakdown, RewardLine } from '@goat/shared';
 import { config } from '../config.js';
 import { sanitizeNickname, verifyToken } from '../auth.js';
-import { type GameFlags, applyGameOutcome, emptyFlags } from '../meta/achievements.js';
+import { type GameFlags, type PlayerStats, applyGameOutcome, emptyFlags } from '../meta/achievements.js';
+import {
+  applyGameToQuests,
+  canWatchRewardedAd,
+  coinReward,
+  ensureQuestState,
+  questProgressView,
+  rankBadge,
+  ratingDeltas,
+  rolloverWeek,
+} from '../meta/economy.js';
 import { getMetaStore } from '../meta/store.js';
 
 interface SeatInfo {
@@ -352,32 +363,138 @@ export class GoatRoom extends Room {
           if (state.multiplier === 3 && r.penalty === 0) flag.wonTripleDeal = true;
         }
       } else if (event.type === 'gameEnded') {
-        void this.awardAchievements(event.goats, event.scores);
+        void this.awardGameResults(event.goats, event.scores);
       }
     }
   }
 
-  private async awardAchievements(goats: Seat[], scores: number[]): Promise<void> {
+  /**
+   * Achievements + economy grants at game end. Two-phase: load everyone (the
+   * ELO exchange needs all pre-game ratings), then mutate/save per seat. Every
+   * seat runs inside its own try/catch — the economy must NEVER break the game
+   * loop. Anonymous seats (playerId 'anon-…') persist nothing and receive a
+   * zeroed `gameRewards {anonymous: true}`.
+   */
+  private async awardGameResults(goats: Seat[], scores: number[]): Promise<void> {
     const instantRule = scores.includes(0) && Math.max(...scores) < this.options.scoreLimit;
+    const maxScore = Math.max(...scores);
+    const now = Date.now();
+    const seq = this.seq;
+    const store = getMetaStore();
+
+    // Phase 1: load stats (null = anonymous or failed load → treated the same).
+    const loaded: (PlayerStats | null)[] = [];
+    for (const info of this.seats) {
+      if (info.playerId.startsWith('anon-')) {
+        loaded.push(null);
+        continue;
+      }
+      try {
+        loaded.push(await store.load(info.playerId));
+      } catch {
+        loaded.push(null);
+      }
+    }
+    // Rating moves only between persistent identities: an anonymous seat
+    // would be a permanent 1000-rated opponent (it resets every game), letting
+    // real players farm unbounded rating off incognito guests. Identified
+    // seats exchange rating among themselves; everyone else gets delta 0.
+    const idSeats: number[] = [];
+    for (let s = 0; s < loaded.length; s++) if (loaded[s]) idSeats.push(s);
+    const subDeltas = ratingDeltas(
+      idSeats.map((s) => loaded[s]!.rating),
+      idSeats.map((s) => loaded[s]!.gamesPlayed),
+      goats.filter((g) => idSeats.includes(g)).map((g) => idSeats.indexOf(g) as Seat),
+    );
+    const deltas: number[] = loaded.map(() => 0);
+    idSeats.forEach((s, i) => {
+      deltas[s] = subDeltas[i]!;
+    });
+
+    // Phase 2: per-seat mutate, save, notify.
     for (let seat = 0; seat < this.seats.length; seat++) {
       const info = this.seats[seat]!;
+      const client = this.clientAt(seat);
+      const stats = loaded[seat];
       const flags = this.flags[seat] ?? emptyFlags();
+      if (!stats) {
+        const zero: CoinBreakdown = { base: 0, margin: 0, flagBonus: 0, streakBonus: 0, questBonus: 0, total: 0 };
+        client?.send(MSG.event, {
+          type: 'gameRewards',
+          seq,
+          anonymous: true,
+          coins: zero,
+          breakdown: [],
+          ratingDelta: 0,
+          rating: 1000,
+          rank: rankBadge(1000),
+          questProgress: [],
+          canDouble: false,
+        });
+        continue;
+      }
       try {
-        const stats = await getMetaStore().load(info.playerId);
+        const isGoat = goats.includes(seat);
+        // Outcome first: coin/quest math wants the POST-game winStreak.
         const fresh = applyGameOutcome(stats, {
-          isGoat: goats.includes(seat),
+          isGoat,
           score: scores[seat]!,
           scoreLimit: this.options.scoreLimit,
           instantRule,
           flags,
         });
-        await getMetaStore().save(info.playerId, stats);
-        const client = this.clientAt(seat);
-        for (const id of fresh) {
-          client?.send(MSG.event, { type: 'achievementUnlocked', seq: this.seq, id });
+        stats.nickname = info.nickname;
+        rolloverWeek(stats, now);
+        const coins = coinReward({
+          isGoat,
+          score: scores[seat]!,
+          maxScore,
+          scoreLimit: this.options.scoreLimit,
+          playerCount: this.seats.length,
+          flags,
+          winStreak: stats.winStreak,
+        });
+        const breakdown: RewardLine[] = [];
+        if (isGoat) {
+          breakdown.push({ ru: 'Козёл — утешительные', amount: coins.base });
+        } else {
+          breakdown.push({ ru: 'Победа', amount: coins.base });
+          if (coins.margin > 0) breakdown.push({ ru: 'Крупный отрыв', amount: coins.margin });
+          if (coins.flagBonus > 0) breakdown.push({ ru: 'Бонусы партии', amount: coins.flagBonus });
+          if (coins.streakBonus > 0) breakdown.push({ ru: 'Серия побед', amount: coins.streakBonus });
         }
+        ensureQuestState(stats, info.playerId, now);
+        const quests = applyGameToQuests(stats.questState!, {
+          isGoat,
+          score: scores[seat]!,
+          playerCount: this.seats.length,
+          winStreak: stats.winStreak,
+          flags,
+        });
+        coins.questBonus = quests.questBonus;
+        coins.total += quests.questBonus;
+        breakdown.push(...quests.lines);
+        stats.coins += coins.total;
+        stats.weeklyCoins += coins.total;
+        stats.rating = Math.max(100, stats.rating + deltas[seat]!);
+        stats.pendingDouble = { kind: 'game', amount: coins.total, expiresAt: now + config.pendingDoubleTtlMs };
+        await store.save(info.playerId, stats);
+        for (const id of fresh) {
+          client?.send(MSG.event, { type: 'achievementUnlocked', seq, id });
+        }
+        client?.send(MSG.event, {
+          type: 'gameRewards',
+          seq,
+          coins,
+          breakdown,
+          ratingDelta: deltas[seat]!,
+          rating: stats.rating,
+          rank: rankBadge(stats.rating),
+          questProgress: questProgressView(stats.questState!),
+          canDouble: canWatchRewardedAd(stats, now, config.maxRewardedAdsPerDay),
+        });
       } catch {
-        // achievements must never break the game loop
+        // economy/achievements must never break the game loop
       }
     }
   }

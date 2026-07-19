@@ -6,12 +6,16 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../core/render_mode.dart';
-import '../theme/tokens.dart';
+import '../theme/cosmetic_styles.dart';
 
 class FeltPainter extends CustomPainter {
-  const FeltPainter({this.lightCenter = const Alignment(0, -0.15)});
+  const FeltPainter({
+    this.lightCenter = const Alignment(0, -0.15),
+    this.theme = FeltTheme.classic,
+  });
 
   final Alignment lightCenter;
+  final FeltTheme theme;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -21,12 +25,12 @@ class FeltPainter extends CustomPainter {
     // software-rasterize (even cached, every resize re-pays them) — a flat
     // felt tone keeps the palette without the shader fills.
     if (cpuRenderMode) {
-      canvas.drawRect(rect, Paint()..color = Tokens.felt700);
+      canvas.drawRect(rect, Paint()..color = theme.flat);
       return;
     }
 
     // 1. Base fill.
-    canvas.drawRect(rect, Paint()..color = Tokens.felt800);
+    canvas.drawRect(rect, Paint()..color = theme.base);
 
     // 2. Radial light pool ("table lamp").
     final center = lightCenter.alongSize(size);
@@ -35,7 +39,7 @@ class FeltPainter extends CustomPainter {
       rect,
       Paint()
         ..shader = RadialGradient(
-          colors: const [Tokens.felt600, Tokens.felt700, Tokens.felt800],
+          colors: [theme.light, theme.mid, theme.base],
           stops: const [0.0, 0.55, 1.0],
         ).createShader(Rect.fromCircle(center: center, radius: radius)),
     );
@@ -46,8 +50,8 @@ class FeltPainter extends CustomPainter {
       Paint()
         ..shader = RadialGradient(
           colors: [
-            Tokens.felt900.withValues(alpha: 0),
-            Tokens.felt900.withValues(alpha: 0.85),
+            theme.deep.withValues(alpha: 0),
+            theme.deep.withValues(alpha: 0.85),
           ],
           stops: const [0.55, 1.0],
         ).createShader(
@@ -61,7 +65,8 @@ class FeltPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant FeltPainter oldDelegate) =>
-      oldDelegate.lightCenter != lightCenter;
+      oldDelegate.lightCenter != lightCenter ||
+      !identical(theme, oldDelegate.theme);
 }
 
 /// Full-bleed felt backdrop; wraps [child] (if any) above the painted felt.
@@ -69,17 +74,19 @@ class FeltBackground extends StatelessWidget {
   const FeltBackground({
     super.key,
     this.lightCenter = const Alignment(0, -0.15),
+    this.theme = FeltTheme.classic,
     this.child,
   });
 
   final Alignment lightCenter;
+  final FeltTheme theme;
   final Widget? child;
 
   @override
   Widget build(BuildContext context) {
     return RepaintBoundary(
       child: CustomPaint(
-        painter: FeltPainter(lightCenter: lightCenter),
+        painter: FeltPainter(lightCenter: lightCenter, theme: theme),
         // Isolate the child: an ink ripple or entrance animation inside it
         // must not force the felt gradients to repaint.
         child: RepaintBoundary(child: child ?? const SizedBox.expand()),

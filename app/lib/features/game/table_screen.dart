@@ -11,20 +11,26 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../core/cards.dart';
+import '../../core/cosmetics.dart';
 import '../../core/game/game_controller.dart';
 import '../../core/game/models.dart';
+import '../../core/monetization/hooks.dart';
 import '../../core/net/transport.dart';
+import '../../core/profile.dart';
 import '../../core/render_mode.dart';
+import '../../core/services/ads/ads_service.dart';
 import '../../core/services/sound.dart';
 import '../../core/session.dart';
 import '../../shared/cards/card_face.dart';
 import '../../shared/cards/suit_paths.dart';
 import '../../shared/felt/felt_background.dart';
+import '../../shared/theme/cosmetic_styles.dart';
 import '../../shared/theme/tokens.dart';
 import '../../shared/widgets/brass_chip.dart';
 import '../../shared/widgets/gold_button.dart';
 import '../../shared/widgets/gold_frame.dart';
 import '../achievements/achievements.dart';
+import '../economy/ranks.dart';
 import 'anim/confetti.dart';
 import 'anim/felt_sweep.dart';
 import 'anim/flight_layer.dart';
@@ -32,6 +38,7 @@ import 'anim/motion_widgets.dart';
 import 'anim/table_anchors.dart';
 import 'anim/table_fx.dart';
 import 'drag_play.dart';
+import 'rewards_block.dart';
 import 'selection.dart';
 
 const _reactionIds = ['thumbs_up', 'laugh', 'shock', 'goat', 'fire', 'cry'];
@@ -72,6 +79,10 @@ class _TableScreenState extends ConsumerState<TableScreen> {
   bool _myReadyLocal = false;
   bool _reconnectBusy = false;
 
+  // Ad-double: one shot per game, busy while the rewarded flow runs.
+  bool _adDoubleUsed = false;
+  bool _adDoubleBusy = false;
+
   // Connecting-overlay escape hatch: after ~10 s without a room the spinner
   // becomes "Не удалось подключиться" + a way back to the lobby.
   bool _connectTimedOut = false;
@@ -93,6 +104,12 @@ class _TableScreenState extends ConsumerState<TableScreen> {
 
   // Felt light-sweep on deal start: re-keyed one-shot.
   int _sweepGen = 0;
+
+  // Equipped cosmetics, latched in build for the section/overlay builders
+  // (they render outside the root watch). Cosmetics cannot change mid-game —
+  // the shop is unreachable from the table — so latching is never stale.
+  CardBackStyle _backStyle = CardBackStyle.classic;
+  FeltTheme _feltTheme = FeltTheme.classic;
 
   // Achievement unlock banners: shown one at a time, queued otherwise.
   final List<AchievementDef> _achQueue = [];
@@ -227,6 +244,11 @@ class _TableScreenState extends ConsumerState<TableScreen> {
         previous?.roomPhase != RoomPhase.gameOver) {
       _rematchVoted = false;
       _showDealOverlay = false;
+      _adDoubleUsed = false;
+      _adDoubleBusy = false;
+      // Interstitial capping counters tick once per finished game; showing
+      // (if ever) happens only on the game-over «Выйти» path in _leaveNow.
+      ref.read(adsServiceProvider).notifyGameFinished();
       dirty = true;
     }
     if (dirty) setState(() {});
@@ -234,6 +256,21 @@ class _TableScreenState extends ConsumerState<TableScreen> {
 
   void _onTableEvent(TableEvent event) {
     if (!mounted) return;
+    if (event.type == 'gameRewards') {
+      final rewards = GameRewards.fromWire(event.data);
+      // Server-authoritative merge into the lobby-visible profile; anonymous
+      // seats earn nothing (applyGameRewards no-ops on them).
+      ref.read(profileProvider.notifier).applyGameRewards(rewards);
+      // Rank-up: purely client-side band-crossing check on the new rating.
+      if (rewards.ratingDelta > 0 &&
+          !identical(
+            rankForRating(rewards.rating - rewards.ratingDelta),
+            rankForRating(rewards.rating),
+          )) {
+        _sound.play(Sfx.achievementBell);
+      }
+      return;
+    }
     if (event.type == 'achievementUnlocked') {
       final def = achievementById('${event.data['id']}');
       if (def != null) {
@@ -360,7 +397,20 @@ class _TableScreenState extends ConsumerState<TableScreen> {
   }
 
   Future<void> _leaveNow() async {
+    // Latch BEFORE leaving: only the game-over exit may show an interstitial.
+    // Mid-game abandons (_confirmLeave) and the connecting-overlay escape
+    // arrive here with another phase and never see an ad; the rematch path
+    // never calls _leaveNow at all.
+    final fromGameOver =
+        ref.read(gameControllerProvider).roomPhase == RoomPhase.gameOver;
     await ref.read(roomSessionProvider.notifier).leave();
+    if (fromGameOver && mounted) {
+      // Seat already released, so the full-screen ad pausing the activity
+      // can't trip reconnect timers. Instant no-op when the policy says no.
+      await ref
+          .read(adsServiceProvider)
+          .maybeShowInterstitial(InterstitialTrigger.leaveToLobby);
+    }
     if (mounted) context.go('/lobby');
   }
 
@@ -581,6 +631,10 @@ class _TableScreenState extends ConsumerState<TableScreen> {
       ),
     );
     final controller = ref.read(gameControllerProvider.notifier);
+    final cosmetics = ref.watch(cosmeticsProvider);
+    _backStyle = cosmetics.cardBack;
+    _feltTheme = cosmetics.felt;
+    _fx.cardBackStyle = cosmetics.cardBack;
     return Scaffold(
       backgroundColor: Colors.transparent,
       // The game surface is not selectable (matters for web/desktop).
@@ -588,8 +642,11 @@ class _TableScreenState extends ConsumerState<TableScreen> {
         child: Stack(
           fit: StackFit.expand,
           children: [
-            const Positioned.fill(
-              child: FeltBackground(lightCenter: Alignment(0, -0.1)),
+            Positioned.fill(
+              child: FeltBackground(
+                lightCenter: const Alignment(0, -0.1),
+                theme: _feltTheme,
+              ),
             ),
             if (_sweepGen > 0)
               Positioned.fill(
@@ -631,7 +688,13 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                 },
               ),
             ),
-            Positioned.fill(child: FlightLayer(key: _flightKey, sound: _sound)),
+            Positioned.fill(
+              child: FlightLayer(
+                key: _flightKey,
+                sound: _sound,
+                style: _backStyle,
+              ),
+            ),
             if (roomPhase == RoomPhase.connecting) _connectingOverlay(),
             if (roomPhase == RoomPhase.lobby)
               // Full-state watch is fine here: the overlay only exists in the
@@ -1227,7 +1290,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
               top: 3,
               child: Transform.rotate(
                 angle: (i - (shown - 1) / 2) * 0.10,
-                child: const CardBack(height: 30),
+                child: CardBack(height: 30, style: _backStyle),
               ),
             ),
           Positioned(
@@ -1489,7 +1552,11 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                 Positioned(
                   left: j * 4.0,
                   top: j * 2.0,
-                  child: FaceDownCard(height: 32, seed: index * 10 + j),
+                  child: FaceDownCard(
+                    height: 32,
+                    seed: index * 10 + j,
+                    style: _backStyle,
+                  ),
                 ),
             ],
           ),
@@ -1958,6 +2025,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
   // ----------------------------------------------------------- overlays
 
   Widget _connectingOverlay() => FeltBackground(
+    theme: _feltTheme,
     child: Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -1991,6 +2059,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     }
     final ready = mySeat?.ready ?? _myReadyLocal;
     return FeltBackground(
+      theme: _feltTheme,
       child: SafeArea(
         child: Column(
           children: [
@@ -2269,6 +2338,14 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                           ),
                         ),
                         const SizedBox(height: 24),
+                        if (state.rewards != null)
+                          ConstrainedBox(
+                            constraints: const BoxConstraints(maxWidth: 320),
+                            child: Padding(
+                              padding: const EdgeInsets.only(bottom: 16),
+                              child: _rewardsBlock(state.rewards!),
+                            ),
+                          ),
                         if (_rematchVoted)
                           const Padding(
                             padding: EdgeInsets.only(bottom: 12),
@@ -2358,6 +2435,46 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     return isGoat
         ? ShakeWidget(delay: const Duration(milliseconds: 500), child: row)
         : row;
+  }
+
+  /// Rewards panel slot: its own Consumer so the ad-button gating (profile
+  /// removeAds + hook presence) reacts without widening the overlay's watch.
+  Widget _rewardsBlock(GameRewards rewards) => Consumer(
+        builder: (context, ref, _) {
+          final hook = ref.watch(rewardedAdHookProvider);
+          final removeAds = ref.watch(
+            profileProvider.select((p) => p.value?.removeAds ?? false),
+          );
+          final canDouble = hook != null &&
+              !removeAds &&
+              rewards.canDouble &&
+              !_adDoubleUsed &&
+              !_adDoubleBusy;
+          return GameRewardsBlock(
+            rewards: rewards,
+            onDoubleAd: canDouble ? () => _watchGameRewardAd(hook) : null,
+          );
+        },
+      );
+
+  /// «Удвоить 🥬 за рекламу» on the game-over screen: show the rewarded ad,
+  /// then let the server double the pending game reward.
+  Future<void> _watchGameRewardAd(RewardedAdHook hook) async {
+    setState(() => _adDoubleBusy = true);
+    try {
+      final watched = await hook.show('doubleGame');
+      if (!watched || !mounted) return;
+      final granted =
+          await ref.read(profileProvider.notifier).doubleReward('doubleGame');
+      if (granted && mounted) {
+        _sound.play(Sfx.achievementBell);
+        setState(() => _adDoubleUsed = true);
+      }
+    } catch (_) {
+      // Reward not granted (expired/duplicate): the button simply returns.
+    } finally {
+      if (mounted) setState(() => _adDoubleBusy = false);
+    }
   }
 
   Widget _reconnectOverlay() {

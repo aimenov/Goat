@@ -17,6 +17,14 @@ dependencies:
   http: ^1.2.0
   clock: ^1.1.1
   audioplayers: ^6.8.1
+  # Mobile-only monetization plugins: imported EXCLUSIVELY from
+  # core/services/{ads,iap}/*_mobile.dart behind dart.library.io conditional
+  # imports so web/desktop builds never compile them in.
+  google_mobile_ads: ^6.0.0
+  in_app_purchase: ^3.2.3
+  # Direct dep only for InAppPurchaseAndroidPlatformAddition (manual consume
+  # of coin packs); same isolation rules as above.
+  in_app_purchase_android: ^0.5.1
 
 dev_dependencies:
   flutter_test:

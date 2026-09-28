@@ -508,33 +508,82 @@ class _TableScreenState extends ConsumerState<TableScreen> {
 
   // ----------------------------------------------------------- drag intents
 
+  bool _beatsAnything(LegalActions legal, int card) =>
+      legal.beatMatrix.values.any((options) => options.contains(card));
+
+  /// Whether dropping [card] on the table discards it face-down: always in
+  /// discard mode, and — straight from the primed beat mode — for a card
+  /// that beats nothing while no beat is half-assigned (going втёмную is
+  /// its only legal play, so no mode switch is needed first).
+  bool _dropDiscards(GameUiState state, int card) {
+    final legal = state.legal;
+    if (!state.isMyTurn || legal == null || legal.kind != 'respond') {
+      return false;
+    }
+    if (!_beatModeActive(state)) return true;
+    return _beatAssignment.isEmpty && !_beatsAnything(legal, card);
+  }
+
+  /// Resolves a discard drop of [card] against the tap selection, mirroring
+  /// the lead rules: a selected card throws the whole selection once it is
+  /// complete, a free card joins it (the throw flies when that makes k,
+  /// otherwise the card is just collected), and with k == 1 the dragged card
+  /// is always the throw. Null when the drop must bounce.
+  ({List<int> cards, bool send})? _discardDropPlan(
+    LegalActions legal,
+    int card,
+  ) {
+    final k = legal.discardCount;
+    if (k <= 0) return null;
+    if (k == 1) return (cards: [card], send: true);
+    if (_selected.contains(card)) {
+      return _selected.length == k
+          ? (cards: _selected.toList(), send: true)
+          : null;
+    }
+    final union = [..._selected, card];
+    if (union.length > k) return null;
+    return (cards: union, send: union.length == k);
+  }
+
   /// Whether a hand card may start a drag in the current mode.
   bool _canDragCard(GameUiState state, int card) {
     final legal = state.legal;
     if (!state.isMyTurn || legal == null) return false;
+    if (_dropDiscards(state, card)) return true;
     if (_beatModeActive(state)) {
-      if (_beatAssignment.containsValue(card)) return false;
-      for (final options in legal.beatMatrix.values) {
-        if (options.contains(card)) return true;
-      }
-      return false;
+      return !_beatAssignment.containsValue(card) &&
+          _beatsAnything(legal, card);
     }
-    if (legal.kind == 'lead') return true;
-    return legal.kind == 'respond' && !_beatMode; // discard mode
+    return legal.kind == 'lead';
   }
 
-  /// The cards that would fly if [card] were dropped right now — feeds the
-  /// drag feedback stack (whole selection when dragging a selected lead).
-  List<int> _dragPayload(GameUiState state, int card) {
+  /// The floating stack under the finger: the cards that would fly if [card]
+  /// were dropped right now (whole selection when dragging a selected lead
+  /// or a completing discard), face-down for discards.
+  Widget _dragFeedback(GameUiState state, int card, double cardH) {
     final legal = state.legal;
-    if (legal != null && legal.kind == 'lead' && _selected.contains(card)) {
+    var cards = [card];
+    var faceDown = false;
+    if (legal != null && _dropDiscards(state, card)) {
+      faceDown = true;
+      final plan = _discardDropPlan(legal, card);
+      if (plan != null && plan.send) cards = plan.cards;
+    } else if (legal != null &&
+        legal.kind == 'lead' &&
+        _selected.contains(card)) {
       final selection = _selected.toList();
       if (isValidLeadSelection(selection) &&
           (legal.maxCount <= 0 || selection.length <= legal.maxCount)) {
-        return selection;
+        cards = selection;
       }
     }
-    return [card];
+    return DragCardsFeedback(
+      cards: cards,
+      cardHeight: cardH,
+      faceDown: faceDown,
+      backStyle: _backStyle,
+    );
   }
 
   /// Resolves a lead-mode center drop to the cards to play, or null when the
@@ -577,25 +626,55 @@ class _TableScreenState extends ConsumerState<TableScreen> {
   bool _centerWillAccept(GameUiState state, int card) {
     final legal = state.legal;
     if (!state.isMyTurn || legal == null) return false;
+    if (_dropDiscards(state, card)) {
+      return _discardDropPlan(legal, card) != null;
+    }
     if (_beatModeActive(state)) {
       return _resolveCenterBeatTarget(legal, card) != null;
     }
     if (legal.kind == 'lead') return _leadDropSelection(legal, card) != null;
-    if (legal.kind == 'respond' && !_beatMode) {
-      return !_selected.contains(card) &&
-          _selected.length < legal.discardCount;
-    }
     return false;
   }
 
-  /// Center drop: leads, resolves a beat target, or collects a discard —
-  /// always through the same fx + controller paths as the buttons (the
-  /// suppression map stays armed for the echoing server event).
+  /// Veil caption while a discard drag hovers the center: the throw goes
+  /// face-down, and for k > 1 how far the drop gets it (e.g. «1/2»).
+  String? _discardVeilLabel(GameUiState state, int card) {
+    final legal = state.legal;
+    if (legal == null || !_dropDiscards(state, card)) return null;
+    final plan = _discardDropPlan(legal, card);
+    if (plan == null) return null;
+    final k = legal.discardCount;
+    return k > 1 ? 'Втёмную ${plan.cards.length}/$k' : 'Втёмную';
+  }
+
+  /// Center drop: leads, resolves a beat target, or throws/collects a
+  /// discard — always through the same fx + controller paths as the buttons
+  /// (the suppression map stays armed for the echoing server event).
   void _onCenterDrop(GameUiState state, int card) {
     final legal = state.legal;
     if (!state.isMyTurn || legal == null) return;
     final controller = ref.read(gameControllerProvider.notifier);
-    if (_beatModeActive(state)) {
+    if (_dropDiscards(state, card)) {
+      final plan = _discardDropPlan(legal, card);
+      if (plan == null) return;
+      if (plan.send) {
+        _sound.play(Sfx.buttonPress);
+        _fx.playMyDiscard(plan.cards.length); // optimistic flight
+        controller.discard(plan.cards);
+        setState(_selected.clear);
+      } else {
+        // Short of k: collect the card (as a tap would) — flipping the
+        // segment to «Скинуть» when the drag came from the primed beat mode.
+        HapticFeedback.selectionClick();
+        _sound.play(Sfx.tapSelect);
+        setState(() {
+          _beatMode = false;
+          _beatTarget = null;
+          _beatAssignment.clear();
+          _selected.add(card);
+        });
+      }
+    } else if (_beatModeActive(state)) {
       final target = _resolveCenterBeatTarget(legal, card);
       if (target != null) _assignBeat(legal, target, card);
     } else if (legal.kind == 'lead') {
@@ -605,15 +684,6 @@ class _TableScreenState extends ConsumerState<TableScreen> {
       _fx.playMyLead(selection); // optimistic: flight starts now
       controller.lead(selection);
       setState(_selected.clear);
-    } else if (legal.kind == 'respond' && !_beatMode) {
-      _sound.play(Sfx.tapSelect);
-      setState(() => _selected.add(card));
-      if (_selected.length == legal.discardCount) {
-        _sound.play(Sfx.buttonPress);
-        _fx.playMyDiscard(_selected.length); // optimistic flight
-        controller.discard(_selected.toList());
-        setState(_selected.clear);
-      }
     }
   }
 
@@ -1349,30 +1419,50 @@ class _TableScreenState extends ConsumerState<TableScreen> {
     return DragTarget<int>(
       onWillAcceptWithDetails: (d) => _centerWillAccept(state, d.data),
       onAcceptWithDetails: (d) => _onCenterDrop(state, d.data),
-      builder: (context, candidates, _) => Stack(
-        fit: StackFit.expand,
-        children: [
-          content,
-          Positioned.fill(
-            child: IgnorePointer(
-              child: candidates.isEmpty
-                  ? const SizedBox.shrink()
-                  : Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: DecoratedBox(
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(Tokens.r14),
-                          color: Tokens.gold300.withValues(alpha: 0.08),
-                          border: Border.all(
-                            color: Tokens.gold300.withValues(alpha: 0.45),
+      builder: (context, candidates, _) {
+        final hovering = candidates.firstOrNull;
+        final discardLabel =
+            hovering == null ? null : _discardVeilLabel(state, hovering);
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            content,
+            Positioned.fill(
+              child: IgnorePointer(
+                child: candidates.isEmpty
+                    ? const SizedBox.shrink()
+                    : Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(Tokens.r14),
+                            color: Tokens.gold300.withValues(alpha: 0.08),
+                            border: Border.all(
+                              color: Tokens.gold300.withValues(alpha: 0.45),
+                            ),
                           ),
+                          child: discardLabel == null
+                              ? null
+                              : Align(
+                                  alignment: Alignment.bottomCenter,
+                                  child: Padding(
+                                    padding: const EdgeInsets.only(bottom: 6),
+                                    child: Text(
+                                      discardLabel,
+                                      style: Tokens.caption.copyWith(
+                                        color: Tokens.gold200,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                  ),
+                                ),
                         ),
                       ),
-                    ),
+              ),
             ),
-          ),
-        ],
-      ),
+          ],
+        );
+      },
     );
   }
 
@@ -1738,10 +1828,7 @@ class _TableScreenState extends ConsumerState<TableScreen> {
                           HapticFeedback.selectionClick();
                           _sound.play(Sfx.tapSelect);
                         },
-                        feedback: DragCardsFeedback(
-                          cards: _dragPayload(state, card),
-                          cardHeight: cardH,
-                        ),
+                        feedback: _dragFeedback(state, card, cardH),
                         childWhenDragging:
                             Opacity(opacity: 0.35, child: face),
                         child: Opacity(opacity: 1, child: face),

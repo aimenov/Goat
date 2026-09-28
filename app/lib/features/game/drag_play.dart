@@ -4,11 +4,13 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../shared/cards/card_face.dart';
+import '../../shared/theme/cosmetic_styles.dart';
 import '../../shared/theme/tokens.dart';
 
 /// Floating stack shown under the pointer while hand cards are dragged:
 /// up to three offset [CardFace]s (onTap == null / unselected keeps their
-/// static fast path) plus an «×n» brass badge when the payload is larger.
+/// static fast path) — or [CardBack]s when the drop discards face-down —
+/// plus an «×n» brass badge when the payload is larger.
 /// No GlobalKeys — the feedback lives in the app overlay and must never
 /// collide with the anchored table subtrees.
 class DragCardsFeedback extends StatelessWidget {
@@ -16,11 +18,17 @@ class DragCardsFeedback extends StatelessWidget {
     super.key,
     required this.cards,
     this.cardHeight = 92,
+    this.faceDown = false,
+    this.backStyle = CardBackStyle.classic,
   });
 
   /// The cards that would be played by this drop, first card on top.
   final List<int> cards;
   final double cardHeight;
+
+  /// Discard drags ride face-down: the throw goes втёмную.
+  final bool faceDown;
+  final CardBackStyle backStyle;
 
   @override
   Widget build(BuildContext context) {
@@ -48,7 +56,9 @@ class DragCardsFeedback extends StatelessWidget {
                     Positioned(
                       left: i * offX,
                       top: i * offY,
-                      child: CardFace(card: shown[i], height: cardHeight),
+                      child: faceDown
+                          ? CardBack(height: cardHeight, style: backStyle)
+                          : CardFace(card: shown[i], height: cardHeight),
                     ),
                   if (cards.length > shown.length)
                     Positioned(
